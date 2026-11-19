@@ -1,0 +1,10 @@
+{
+	"item.realistic_ificator.realistic_ificator": "Realistic-Ificator",
+	"item.realistic_ificator.realistic_prefix": "Realistic %s",
+	"entity.realistic_ificator.realistic_block": "Realistic Block",
+	"container.realistic_ificator.realistic_ificator": "Realistic-Ificator",
+	"container.realistic_ificator.hint": "Insert a block to make it realistic",
+	"container.realistic_ificator.invalid": "That block can't be made realistic",
+	"tooltip.realistic_ificator.realistic.1": "Realistic: obeys physics",
+	"tooltip.realistic_ificator.realistic.2": "Place onto one to make it bigger"
+}

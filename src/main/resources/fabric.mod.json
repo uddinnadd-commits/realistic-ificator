@@ -1,0 +1,25 @@
+{
+	"schemaVersion": 1,
+	"id": "realistic_ificator",
+	"version": "${version}",
+	"name": "Realistic-Ificator",
+	"description": "Adds the Realistic-Ificator: turn any solid block into a realistic physics block that tumbles, floats by weight, can be stood on, grows when you build onto it, and gets blown apart by TNT.",
+	"authors": ["uddinnadd-commits"],
+	"contact": {
+		"sources": "https://github.com/uddinnadd-commits/realistic-ificator"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/realistic_ificator/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": ["io.github.uddinnadd.realisticificator.RealisticIficator"],
+		"client": ["io.github.uddinnadd.realisticificator.client.RealisticIficatorClient"]
+	},
+	"mixins": ["realistic_ificator.mixins.json"],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
