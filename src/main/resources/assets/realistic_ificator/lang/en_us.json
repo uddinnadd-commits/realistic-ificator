@@ -12,4 +12,16 @@
 	"tooltip.realistic_ificator.realistic.2": "Place onto one to make it bigger",
 	"tooltip.realistic_ificator.realistic_egg.1": "Realistic: spawns a ragdoll corpse",
 	"tooltip.realistic_ificator.realistic_egg.2": "Pick it up with a Physics Gun"
+,
+	"item.realistic_ificator.structure_wand": "Structure Wand",
+	"message.realistic_ificator.wand.first": "Corner 1 set at %s. Right-click the opposite corner.",
+	"message.realistic_ificator.wand.second": "Corner 2 set at %s: %s x %s x %s area. Sneak + right-click to make it realistic.",
+	"message.realistic_ificator.wand.incomplete": "Select two corners first (right-click blocks).",
+	"message.realistic_ificator.wand.done": "Made %s blocks realistic (%s bodies).",
+	"message.realistic_ificator.wand.nothing": "Nothing in that area can be made realistic.",
+	"message.realistic_ificator.wand.too_big": "Too big: %s blocks (limit %s).",
+	"tooltip.realistic_ificator.wand.first": "Corner 1: %s",
+	"tooltip.realistic_ificator.wand.second": "Corner 2: %s",
+	"tooltip.realistic_ificator.wand.help.1": "Right-click two blocks to select an area",
+	"tooltip.realistic_ificator.wand.help.2": "Sneak + right-click to make it realistic"
 }

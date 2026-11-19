@@ -66,7 +66,7 @@ import org.jspecify.annotations.Nullable;
  * The entity position is the centre of mass.
  */
 public class RealisticBlockEntity extends Entity implements PhysicsObject {
-	public static final int MAX_CELLS = 64;
+	public static final int MAX_CELLS = 1024;
 	private static final double GRAVITY = 0.04;
 	private static final int MIN_SUBSTEPS = 4;
 	private static final int MAX_SUBSTEPS = 16;

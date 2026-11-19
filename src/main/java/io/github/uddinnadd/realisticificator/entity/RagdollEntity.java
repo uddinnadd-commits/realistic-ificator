@@ -173,9 +173,18 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		return ragdoll;
 	}
 
-	/** Stands the skeleton up in its rest pose with its feet at {@code feet}, facing {@code yaw}. */
+	/** Lays the skeleton out with its feet at {@code feet}, facing {@code yaw}, already slumping like a corpse. */
 	private void layOutBones(Vec3 feet, float yaw) {
-		Quaterniond facing = new Quaterniond().rotationY(-Math.toRadians(yaw));
+		// A four-legged stance is stable enough to stay standing, so start corpses tipped over: quadrupeds rolled
+		// onto their side, bipeds leaning so they fold at the hips.
+		double side = this.random.nextBoolean() ? 1 : -1;
+		Quaterniond slump = switch (this.skeleton().kind) {
+			case QUADRUPED -> new Quaterniond().rotationZ(side * 1.35);
+			case BIPED -> new Quaterniond().rotationX(side * 0.35);
+			case BLOB -> new Quaterniond();
+		};
+		Quaterniond facing = new Quaterniond().rotationY(-Math.toRadians(yaw)).mul(slump);
+		double lowest = Double.MAX_VALUE;
 		for (int i = 0; i < this.bones().length; i++) {
 			Bone bone = this.bones()[i];
 			Vector3d c = facing.transform(RigidMath.vec(this.skeleton().bones.get(i).center()));
@@ -183,6 +192,11 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			bone.rot.set(facing);
 			bone.linVel.zero();
 			bone.angVel.zero();
+			lowest = Math.min(lowest, bone.worldBox().minY);
+		}
+		double lift = feet.y + 0.02 - lowest;
+		for (Bone bone : this.bones()) {
+			bone.pos.y += lift;
 		}
 		// A perfectly balanced corpse could stay standing; tip it slightly so it slumps over.
 		this.bones()[RagdollSkeleton.TORSO].angVel.set(this.random.nextGaussian() * 0.04, 0, this.random.nextGaussian() * 0.04);

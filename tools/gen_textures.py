@@ -85,6 +85,34 @@ for y, row in enumerate(gun_art):
         gun[y][x] = hexc("555b66") if (ch == "W" and y > 9) else gun_pal[ch]
 write_png(os.path.join(ROOT, "main/resources/assets/realistic_ificator/textures/item/physics_gun.png"), 16, 16, gun)
 
+# ---- item: structure wand (blaze-rod shaft, amethyst tip with a selection-box glint) ----
+wand = canvas(16, 16)
+wand_art = [
+    "................",
+    "...........aAa..",
+    "..........aAWAa.",
+    "..........AWWWA.",
+    "..........aAWAa.",
+    ".........r.aAa..",
+    "........rR......",
+    ".......rRr......",
+    "......rRr.......",
+    ".....rRr........",
+    "....rRr.........",
+    "...rRr..........",
+    "..dRr...........",
+    ".ddr............",
+    ".dd.............",
+    "................",
+]
+wand_pal = {"a": hexc("8a5fc2"), "A": hexc("c79bff"), "W": hexc("f6ecff"), "r": hexc("b5651d"),
+            "R": hexc("f2b33d"), "d": hexc("5a3a1a")}
+for y, row in enumerate(wand_art):
+    for x, ch in enumerate(row):
+        if ch != ".":
+            wand[y][x] = wand_pal[ch]
+write_png(os.path.join(ROOT, "main/resources/assets/realistic_ificator/textures/item/structure_wand.png"), 16, 16, wand)
+
 # ---- GUI: smithing-table style panel, 176x166 on a 256x256 sheet ----
 W, H = 176, 166
 gui = canvas(256, 256)

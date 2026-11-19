@@ -1,0 +1,17 @@
+{
+	"type": "minecraft:crafting_shaped",
+	"category": "equipment",
+	"key": {
+		"A": "minecraft:amethyst_shard",
+		"E": "minecraft:ender_eye",
+		"B": "minecraft:blaze_rod"
+	},
+	"pattern": [
+		" AE",
+		" BA",
+		"B  "
+	],
+	"result": {
+		"id": "realistic_ificator:structure_wand"
+	}
+}

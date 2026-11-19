@@ -267,6 +267,10 @@ public final class BlockStructure {
 		return new BlockStructure(Map.of(BlockPos.ZERO, state));
 	}
 
+	public static BlockStructure of(Map<BlockPos, BlockState> cells) {
+		return new BlockStructure(cells);
+	}
+
 	private static BlockStructure fromCells(List<Cell> list) {
 		Map<BlockPos, BlockState> map = new LinkedHashMap<>();
 		list.forEach(c -> map.put(c.pos(), c.state()));

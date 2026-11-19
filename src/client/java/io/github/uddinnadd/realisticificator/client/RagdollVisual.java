@@ -64,6 +64,8 @@ public final class RagdollVisual {
 				// Unknown data just means the default look.
 			}
 			dummy.setPos(ragdoll.position());
+			// Never added to the level, so it has no ID; vanilla's held-item rendering reads one and throws without it.
+			dummy.setId(ragdoll.getId());
 			EntityRenderer<?, ?> renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(dummy);
 			if (!(renderer instanceof LivingEntityRenderer living)) {
 				return null;

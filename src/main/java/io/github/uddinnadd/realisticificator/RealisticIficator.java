@@ -34,6 +34,7 @@ public class RealisticIficator implements ModInitializer {
 		CreativeModeTabEvents.modifyOutputEvent(CreativeModeTabs.TOOLS_AND_UTILITIES).register(output -> {
 			output.accept(ModItems.REALISTIC_IFICATOR);
 			output.accept(ModItems.PHYSICS_GUN);
+			output.accept(ModItems.STRUCTURE_WAND);
 		});
 
 		LOGGER.info("Realistic-Ificator loaded: blocks are about to get real.");

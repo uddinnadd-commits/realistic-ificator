@@ -3,6 +3,7 @@ package io.github.uddinnadd.realisticificator.registry;
 import io.github.uddinnadd.realisticificator.RealisticIficator;
 import io.github.uddinnadd.realisticificator.item.PhysicsGunItem;
 import io.github.uddinnadd.realisticificator.item.RealisticIficatorItem;
+import io.github.uddinnadd.realisticificator.item.StructureWandItem;
 import net.minecraft.core.Registry;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -26,6 +27,12 @@ public final class ModItems {
 		new PhysicsGunItem(new Item.Properties().setId(PHYSICS_GUN_KEY).stacksTo(1).rarity(Rarity.EPIC)
 			// Walk and sprint at full speed while holding something, like in Gmod.
 			.component(DataComponents.USE_EFFECTS, new UseEffects(true, false, 1.0F)))
+	);
+	public static final ResourceKey<Item> STRUCTURE_WAND_KEY = ResourceKey.create(Registries.ITEM, RealisticIficator.id("structure_wand"));
+	public static final Item STRUCTURE_WAND = Registry.register(
+		BuiltInRegistries.ITEM,
+		STRUCTURE_WAND_KEY,
+		new StructureWandItem(new Item.Properties().setId(STRUCTURE_WAND_KEY).stacksTo(1).rarity(Rarity.RARE))
 	);
 
 	private ModItems() {

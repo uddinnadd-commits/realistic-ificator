@@ -9,11 +9,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.block.MovingBlockRenderState;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
@@ -22,6 +24,13 @@ import org.jspecify.annotations.Nullable;
 
 public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRenderer.State> {
 	private final Map<RagdollEntity, RagdollVisual> visuals = new WeakHashMap<>();
+	private final Map<RagdollEntity, Integer> retryAt = new WeakHashMap<>();
+	/** Used for each bone when a mob's model can't be built (e.g. a modded mob with an unusual renderer). */
+	private static final MovingBlockRenderState FALLBACK_BLOCK = new MovingBlockRenderState();
+
+	static {
+		FALLBACK_BLOCK.blockState = Blocks.TERRACOTTA.defaultBlockState();
+	}
 
 	public static class State extends EntityRenderState {
 		@Nullable RagdollVisual visual;
@@ -44,9 +53,13 @@ public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRender
 	public void extractRenderState(RagdollEntity entity, State state, float partialTicks) {
 		super.extractRenderState(entity, state, partialTicks);
 		RagdollVisual visual = this.visuals.get(entity);
-		if (visual == null && !this.visuals.containsKey(entity)) {
+		if (visual == null && entity.tickCount >= this.retryAt.getOrDefault(entity, 0)) {
 			visual = RagdollVisual.build(entity);
-			this.visuals.put(entity, visual);
+			if (visual != null) {
+				this.visuals.put(entity, visual);
+			} else {
+				this.retryAt.put(entity, entity.tickCount + 100); // try again in a few seconds, not every frame
+			}
 		}
 		state.visual = visual;
 		state.skeleton = entity.skeleton();
@@ -100,6 +113,18 @@ public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRender
 				poseStack.translate(-rest.x, -rest.y, -rest.z);
 				poseStack.mulPose(segment.rest());
 				collector.submitModelPart(segment.cubes(), poseStack, state.visual.renderType, state.lightCoords, OverlayTexture.NO_OVERLAY, null);
+				poseStack.popPose();
+			}
+		} else if (state.skeleton != null) {
+			for (int bone = 0; bone < Math.min(state.bonePositions.size(), state.skeleton.bones.size()); bone++) {
+				Vector3f p = state.bonePositions.get(bone);
+				Vec3 half = state.skeleton.bones.get(bone).half();
+				poseStack.pushPose();
+				poseStack.translate(p.x, p.y, p.z);
+				poseStack.rotate(state.boneRotations.get(bone));
+				poseStack.scale((float) half.x * 2, (float) half.y * 2, (float) half.z * 2);
+				poseStack.translate(-0.5F, -0.5F, -0.5F);
+				collector.submitMovingBlock(poseStack, FALLBACK_BLOCK, state.outlineColor);
 				poseStack.popPose();
 			}
 		}
