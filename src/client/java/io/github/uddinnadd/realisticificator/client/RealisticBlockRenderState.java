@@ -15,4 +15,6 @@ public class RealisticBlockRenderState extends EntityRenderState {
 	public int cellCount;
 	public final Quaternionf rotation = new Quaternionf();
 	public final Vector3f pivot = new Vector3f();
+	public float originToCenter;
+	public float shadowSize;
 }

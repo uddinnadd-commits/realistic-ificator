@@ -9,6 +9,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.util.Unit;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.SpawnEggItem;
 import net.minecraft.world.item.component.ItemLore;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
@@ -26,12 +27,15 @@ public final class RealisticItems {
 		return !stack.isEmpty() && stack.has(ModComponents.REALISTIC);
 	}
 
-	/** Full, solid, single-block, model-rendered blocks only: those are the ones a rigid body can represent. */
+	/** Solid, single-block, model-rendered blocks (what a rigid body can represent), or spawn eggs (ragdoll corpses). */
 	public static boolean canBeMadeRealistic(ItemStack stack) {
-		if (stack.isEmpty() || isRealistic(stack) || !(stack.getItem() instanceof BlockItem blockItem)) {
+		if (stack.isEmpty() || isRealistic(stack)) {
 			return false;
 		}
-		return canBeRealistic(blockItem.getBlock().defaultBlockState());
+		if (stack.getItem() instanceof SpawnEggItem) {
+			return SpawnEggItem.getType(stack) != null;
+		}
+		return stack.getItem() instanceof BlockItem blockItem && canBeRealistic(blockItem.getBlock().defaultBlockState());
 	}
 
 	public static boolean canBeRealistic(BlockState state) {
@@ -49,9 +53,10 @@ public final class RealisticItems {
 		result.set(ModComponents.REALISTIC, Unit.INSTANCE);
 		result.set(DataComponents.ITEM_NAME, Component.translatable("item.realistic_ificator.realistic_prefix", baseName));
 		result.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
+		String lore = input.getItem() instanceof SpawnEggItem ? "tooltip.realistic_ificator.realistic_egg" : "tooltip.realistic_ificator.realistic";
 		result.set(DataComponents.LORE, new ItemLore(List.of(
-			Component.translatable("tooltip.realistic_ificator.realistic.1").withStyle(style -> style.withItalic(false).withColor(ChatFormatting.AQUA)),
-			Component.translatable("tooltip.realistic_ificator.realistic.2").withStyle(style -> style.withItalic(false).withColor(ChatFormatting.GRAY))
+			Component.translatable(lore + ".1").withStyle(style -> style.withItalic(false).withColor(ChatFormatting.AQUA)),
+			Component.translatable(lore + ".2").withStyle(style -> style.withItalic(false).withColor(ChatFormatting.GRAY))
 		)));
 		return result;
 	}

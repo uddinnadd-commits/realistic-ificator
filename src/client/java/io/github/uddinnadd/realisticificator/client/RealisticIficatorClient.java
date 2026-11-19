@@ -10,6 +10,7 @@ public class RealisticIficatorClient implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
 		EntityRendererRegistry.register(ModEntities.REALISTIC_BLOCK, RealisticBlockRenderer::new);
+		EntityRendererRegistry.register(ModEntities.RAGDOLL, RagdollRenderer::new);
 		MenuScreens.register(ModMenus.REALISTIC_IFICATOR, RealisticIficatorScreen::new);
 	}
 }

@@ -1,6 +1,6 @@
 # Realistic-Ificator
 
-A Fabric mod for **Minecraft 26.3** that adds the **Realistic-Ificator**, a gadget that turns ordinary blocks into *realistic* physics blocks.
+A Fabric mod for **Minecraft 26.3** that adds the **Realistic-Ificator**, a gadget that turns ordinary blocks into *realistic* physics blocks and spawn eggs into ragdoll corpses, plus a Gmod-style Physics Gun to throw them around.
 
 ## How to use
 
@@ -12,7 +12,7 @@ A Fabric mod for **Minecraft 26.3** that adds the **Realistic-Ificator**, a gadg
    I I I      G = glass, S = smithing table
    ```
 
-2. Right-click with it to open a smithing-table style screen. Put a stack of blocks in the left slot and take the realistic version out of the right slot.
+2. Right-click with it to open a smithing-table style screen. Put a stack of blocks (or spawn eggs) in the left slot and take the realistic version out of the right slot.
 3. Place a realistic block like any other block. It appears in its realistic form.
 
 ## What realistic blocks do
@@ -28,6 +28,31 @@ A Fabric mod for **Minecraft 26.3** that adds the **Realistic-Ificator**, a gadg
 | **Pushable** | Walk into it to shove it at the point of contact. Light blocks slide, stone barely moves, and iron or gold won't budge unless it's on ice. |
 | **TNT disassembles it** | Explosions break the structure into single blocks that fly apart and tumble. Fragile blocks such as glass and leaves shatter. |
 | **Break it** | Sneak and punch to break it. It drops its realistic blocks (in survival). |
+
+Slabs, stairs and other partial blocks keep their real shape, both for physics and for walking on them.
+
+## Ragdoll corpses
+
+Put a **spawn egg** into the Realistic-Ificator to get a *Realistic* spawn egg. Using it on the ground spawns a ragdoll corpse of that mob instead of a living mob. Corpses keep the mob's look and variant.
+
+- The corpse is a set of rigid bones (head, torso, arms and legs, or four legs for animals) joined by ball joints with angle limits. It slumps, folds over ledges and tumbles down stairs.
+- Corpses float (flesh is slightly lighter than water), get blown around by TNT, can be stood on, and are shoved by falling realistic blocks.
+- Punch a corpse to knock it where you hit it. Sneak and punch to remove it.
+
+## Physics gun
+
+```
+  G D      D = diamond, G = glass, E = ender pearl
+I R G      R = block of redstone, I = iron ingot
+E I
+```
+
+Works like Garry's Mod:
+
+- **Hold right-click** on a realistic block or corpse to pick it up. It follows your crosshair and you can walk and sprint while carrying it. Grabbing a corpse by a limb drags it by that limb.
+- **Let go** and it keeps the speed you swung it with, so you can throw it.
+- **Sneak and release** to freeze it in mid-air. Grab it again or hit it to unfreeze it.
+- **Sneak and walk forward or back** while holding to push it away or pull it closer.
 
 ## Building
 

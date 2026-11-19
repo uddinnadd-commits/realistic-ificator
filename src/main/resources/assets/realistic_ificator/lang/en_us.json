@@ -1,10 +1,15 @@
 {
 	"item.realistic_ificator.realistic_ificator": "Realistic-Ificator",
+	"item.realistic_ificator.physics_gun": "Physics Gun",
 	"item.realistic_ificator.realistic_prefix": "Realistic %s",
 	"entity.realistic_ificator.realistic_block": "Realistic Block",
+	"entity.realistic_ificator.ragdoll": "Corpse",
+	"entity.realistic_ificator.ragdoll.of": "%s Corpse",
 	"container.realistic_ificator.realistic_ificator": "Realistic-Ificator",
-	"container.realistic_ificator.hint": "Insert a block to make it realistic",
-	"container.realistic_ificator.invalid": "That block can't be made realistic",
+	"container.realistic_ificator.hint": "Insert a block or spawn egg",
+	"container.realistic_ificator.invalid": "That can't be made realistic",
 	"tooltip.realistic_ificator.realistic.1": "Realistic: obeys physics",
-	"tooltip.realistic_ificator.realistic.2": "Place onto one to make it bigger"
+	"tooltip.realistic_ificator.realistic.2": "Place onto one to make it bigger",
+	"tooltip.realistic_ificator.realistic_egg.1": "Realistic: spawns a ragdoll corpse",
+	"tooltip.realistic_ificator.realistic_egg.2": "Pick it up with a Physics Gun"
 }

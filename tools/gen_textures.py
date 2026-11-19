@@ -56,6 +56,35 @@ for y, row in enumerate(art):
             item[y][x] = pal[ch]
 write_png(os.path.join(ROOT, "main/resources/assets/realistic_ificator/textures/item/realistic_ificator.png"), 16, 16, item)
 
+# ---- item: physics gun (Gmod-style: dark body, glowing cyan prongs) ----
+gun = canvas(16, 16)
+gun_art = [
+    "................",
+    "............c...",
+    "..........cCCc..",
+    ".........cCWWc..",
+    "........kCWCc...",
+    ".......kKKkc....",
+    "......kKBBKk....",
+    ".....kKBBKk.....",
+    "....kKKKKk......",
+    "...gkKKkk.......",
+    "..wwgkk.........",
+    ".wWWwg..........",
+    ".wWWw...........",
+    "..ww............",
+    "................",
+    "................",
+]
+gun_pal = {"c": hexc("1aa6c7"), "C": hexc("5fe3ff"), "W": hexc("e6fbff"), "k": hexc("1c1f24"),
+           "K": hexc("3a404a"), "B": hexc("2fd0ff"), "g": hexc("c9a227"), "w": hexc("2b2b2b")}
+for y, row in enumerate(gun_art):
+    for x, ch in enumerate(row):
+        if ch == ".":
+            continue
+        gun[y][x] = hexc("555b66") if (ch == "W" and y > 9) else gun_pal[ch]
+write_png(os.path.join(ROOT, "main/resources/assets/realistic_ificator/textures/item/physics_gun.png"), 16, 16, gun)
+
 # ---- GUI: smithing-table style panel, 176x166 on a 256x256 sheet ----
 W, H = 176, 166
 gui = canvas(256, 256)

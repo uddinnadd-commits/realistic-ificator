@@ -1,0 +1,19 @@
+{
+	"type": "minecraft:crafting_shaped",
+	"category": "equipment",
+	"key": {
+		"D": "minecraft:diamond",
+		"G": "minecraft:glass",
+		"E": "minecraft:ender_pearl",
+		"R": "minecraft:redstone_block",
+		"I": "minecraft:iron_ingot"
+	},
+	"pattern": [
+		" GD",
+		"IRG",
+		"EI "
+	],
+	"result": {
+		"id": "realistic_ificator:physics_gun"
+	}
+}

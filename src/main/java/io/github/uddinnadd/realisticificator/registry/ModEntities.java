@@ -1,6 +1,7 @@
 package io.github.uddinnadd.realisticificator.registry;
 
 import io.github.uddinnadd.realisticificator.RealisticIficator;
+import io.github.uddinnadd.realisticificator.entity.RagdollEntity;
 import io.github.uddinnadd.realisticificator.entity.RealisticBlockEntity;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -21,6 +22,18 @@ public final class ModEntities {
 			.clientTrackingRange(10)
 			.updateInterval(1)
 			.build(REALISTIC_BLOCK_KEY)
+	);
+	public static final ResourceKey<EntityType<?>> RAGDOLL_KEY = ResourceKey.create(Registries.ENTITY_TYPE, RealisticIficator.id("ragdoll"));
+	public static final EntityType<RagdollEntity> RAGDOLL = Registry.register(
+		BuiltInRegistries.ENTITY_TYPE,
+		RAGDOLL_KEY,
+		EntityType.Builder.<RagdollEntity>of(RagdollEntity::new, MobCategory.MISC)
+			.noLootTable()
+			.sized(0.6F, 0.6F)
+			.fireImmune()
+			.clientTrackingRange(10)
+			.updateInterval(1)
+			.build(RAGDOLL_KEY)
 	);
 
 	private ModEntities() {

@@ -23,13 +23,18 @@ public class RealisticIficator implements ModInitializer {
 	public void onInitialize() {
 		FabricEntityDataRegistry.register(id("block_structure"), BlockStructure.SERIALIZER);
 		FabricEntityDataRegistry.register(id("body_pose"), io.github.uddinnadd.realisticificator.entity.BodyPose.SERIALIZER);
+		FabricEntityDataRegistry.register(id("ragdoll_info"), io.github.uddinnadd.realisticificator.entity.RagdollInfo.SERIALIZER);
+		FabricEntityDataRegistry.register(id("ragdoll_poses"), io.github.uddinnadd.realisticificator.entity.RagdollInfo.POSES_SERIALIZER);
 		ModComponents.init();
 		ModItems.init();
 		ModEntities.init();
 		ModMenus.init();
 
 		UseBlockCallback.EVENT.register(RealisticPlacement::onUseBlock);
-		CreativeModeTabEvents.modifyOutputEvent(CreativeModeTabs.TOOLS_AND_UTILITIES).register(output -> output.accept(ModItems.REALISTIC_IFICATOR));
+		CreativeModeTabEvents.modifyOutputEvent(CreativeModeTabs.TOOLS_AND_UTILITIES).register(output -> {
+			output.accept(ModItems.REALISTIC_IFICATOR);
+			output.accept(ModItems.PHYSICS_GUN);
+		});
 
 		LOGGER.info("Realistic-Ificator loaded: blocks are about to get real.");
 	}

@@ -15,7 +15,13 @@
 		"main": ["io.github.uddinnadd.realisticificator.RealisticIficator"],
 		"client": ["io.github.uddinnadd.realisticificator.client.RealisticIficatorClient"]
 	},
-	"mixins": ["realistic_ificator.mixins.json"],
+	"mixins": [
+		"realistic_ificator.mixins.json",
+		{
+			"config": "realistic_ificator.client.mixins.json",
+			"environment": "client"
+		}
+	],
 	"depends": {
 		"fabricloader": ">=0.20.1",
 		"minecraft": "~26.3",

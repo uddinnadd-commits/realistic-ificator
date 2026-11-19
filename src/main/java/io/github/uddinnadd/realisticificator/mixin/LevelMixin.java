@@ -1,6 +1,7 @@
 package io.github.uddinnadd.realisticificator.mixin;
 
 import com.google.common.collect.ImmutableList;
+import io.github.uddinnadd.realisticificator.entity.RagdollEntity;
 import io.github.uddinnadd.realisticificator.entity.RealisticBlockEntity;
 import java.util.List;
 import java.util.function.Predicate;
@@ -32,8 +33,11 @@ public abstract class LevelMixin {
 		}
 		ImmutableList.Builder<VoxelShape> shapes = ImmutableList.builderWithExpectedSize(colliding.size());
 		for (Entity entity : colliding) {
-			if (entity instanceof RealisticBlockEntity body) {
-				for (AABB cell : body.getCollisionBoxes()) {
+			List<AABB> boxes = entity instanceof RealisticBlockEntity body ? body.getCollisionBoxes()
+				: entity instanceof RagdollEntity ragdoll ? ragdoll.getCollisionBoxes()
+				: null;
+			if (boxes != null) {
+				for (AABB cell : boxes) {
 					if (cell.intersects(testArea.inflate(1.0E-7))) {
 						shapes.add(Shapes.create(cell));
 					}
