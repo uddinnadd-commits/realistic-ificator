@@ -33,7 +33,7 @@ public abstract class LevelMixin {
 		ImmutableList.Builder<VoxelShape> shapes = ImmutableList.builderWithExpectedSize(colliding.size());
 		for (Entity entity : colliding) {
 			if (entity instanceof RealisticBlockEntity body) {
-				for (AABB cell : body.getCellBoxes()) {
+				for (AABB cell : body.getCollisionBoxes()) {
 					if (cell.intersects(testArea.inflate(1.0E-7))) {
 						shapes.add(Shapes.create(cell));
 					}

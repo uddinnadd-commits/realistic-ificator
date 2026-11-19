@@ -5,29 +5,26 @@ import com.mojang.serialization.codecs.RecordCodecBuilder;
 import io.github.uddinnadd.realisticificator.physics.Densities;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.syncher.EntityDataSerializer;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.phys.Vec3;
-import org.joml.Matrix3f;
-import org.joml.Vector3f;
+import org.joml.Matrix3d;
 
 /**
- * Immutable set of block cells that make up one rigid body.
+ * Immutable set of unit cubes that make up one rigid body, plus its mass properties.
  * <p>
- * Cell {@code c} occupies, relative to the entity position {@code P},
- * {@code [P.x + c.x - 0.5, P.x + c.x + 0.5] x [P.y + c.y, P.y + c.y + 1] x [P.z + c.z - 0.5, P.z + c.z + 0.5]},
- * so a single cell at the origin matches vanilla's bottom-centre entity position.
+ * "Structure space": cell {@code c} is the unit cube centred on the integer point {@code c}.
+ * The body's local frame is structure space translated so the centre of mass is the origin.
  */
 public final class BlockStructure {
 	public record Cell(BlockPos pos, BlockState state) {
@@ -61,6 +58,9 @@ public final class BlockStructure {
 	private final Map<BlockPos, BlockState> cells;
 	private final double mass;
 	private final Vec3 centerOfMass;
+	private final Matrix3d inverseInertia;
+	private final List<Vec3> samplePoints;
+	private final double radius;
 
 	private BlockStructure(Map<BlockPos, BlockState> cells) {
 		this.cells = Collections.unmodifiableMap(new LinkedHashMap<>(cells));
@@ -70,11 +70,74 @@ public final class BlockStructure {
 			BlockPos p = e.getKey();
 			m += d;
 			x += d * p.getX();
-			y += d * (p.getY() + 0.5);
+			y += d * p.getY();
 			z += d * p.getZ();
 		}
-		this.mass = m;
-		this.centerOfMass = m > 0 ? new Vec3(x / m, y / m, z / m) : new Vec3(0, 0.5, 0);
+		this.mass = Math.max(m, 1.0E-3);
+		this.centerOfMass = m > 0 ? new Vec3(x / m, y / m, z / m) : Vec3.ZERO;
+
+		// Inertia tensor about the centre of mass: each cube's own m/6 plus the parallel-axis term.
+		Matrix3d inertia = new Matrix3d().zero();
+		double maxR = 0;
+		for (Map.Entry<BlockPos, BlockState> e : this.cells.entrySet()) {
+			double d = Densities.of(e.getValue());
+			double rx = e.getKey().getX() - this.centerOfMass.x, ry = e.getKey().getY() - this.centerOfMass.y, rz = e.getKey().getZ() - this.centerOfMass.z;
+			double r2 = rx * rx + ry * ry + rz * rz;
+			maxR = Math.max(maxR, Math.sqrt(r2));
+			inertia.m00 += d / 6.0 + d * (r2 - rx * rx);
+			inertia.m11 += d / 6.0 + d * (r2 - ry * ry);
+			inertia.m22 += d / 6.0 + d * (r2 - rz * rz);
+			inertia.m01 -= d * rx * ry;
+			inertia.m02 -= d * rx * rz;
+			inertia.m12 -= d * ry * rz;
+		}
+		inertia.m10 = inertia.m01;
+		inertia.m20 = inertia.m02;
+		inertia.m21 = inertia.m12;
+		this.inverseInertia = this.cells.isEmpty() ? new Matrix3d() : inertia.invert();
+		this.radius = maxR + Math.sqrt(3) / 2;
+		this.samplePoints = computeSamplePoints(this.cells.keySet());
+	}
+
+	/** Corners, edge midpoints and face centres of every cell, de-duplicated, minus points buried inside the body. */
+	private static List<Vec3> computeSamplePoints(Set<BlockPos> cells) {
+		Set<BlockPos> doubled = new HashSet<>();
+		for (BlockPos c : cells) {
+			for (int dx = -1; dx <= 1; dx++) {
+				for (int dy = -1; dy <= 1; dy++) {
+					for (int dz = -1; dz <= 1; dz++) {
+						if (dx != 0 || dy != 0 || dz != 0) {
+							doubled.add(new BlockPos(c.getX() * 2 + dx, c.getY() * 2 + dy, c.getZ() * 2 + dz));
+						}
+					}
+				}
+			}
+		}
+		List<Vec3> points = new ArrayList<>();
+		for (BlockPos p : doubled) {
+			if (!isBuried(p, cells)) {
+				points.add(new Vec3(p.getX() / 2.0, p.getY() / 2.0, p.getZ() / 2.0));
+			}
+		}
+		return List.copyOf(points);
+	}
+
+	private static boolean isBuried(BlockPos doubled, Set<BlockPos> cells) {
+		int[] xs = touching(doubled.getX()), ys = touching(doubled.getY()), zs = touching(doubled.getZ());
+		for (int x : xs) {
+			for (int y : ys) {
+				for (int z : zs) {
+					if (!cells.contains(new BlockPos(x, y, z))) {
+						return false;
+					}
+				}
+			}
+		}
+		return true;
+	}
+
+	private static int[] touching(int doubled) {
+		return (doubled & 1) == 0 ? new int[]{doubled / 2} : new int[]{(doubled - 1) / 2, (doubled + 1) / 2};
 	}
 
 	public static BlockStructure single(BlockState state) {
@@ -109,6 +172,14 @@ public final class BlockStructure {
 		return this.cells.containsKey(pos);
 	}
 
+	public boolean contains(int x, int y, int z) {
+		return this.cells.containsKey(new BlockPos(x, y, z));
+	}
+
+	public BlockState get(BlockPos pos) {
+		return this.cells.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+	}
+
 	/** The block every cell is made of; structures only grow with more of the same kind. */
 	public Block kind() {
 		return this.cells.isEmpty() ? Blocks.AIR : this.cells.values().iterator().next().getBlock();
@@ -124,66 +195,29 @@ public final class BlockStructure {
 		return new BlockStructure(copy);
 	}
 
-	/** Total mass in "water-filled cell" units. */
+	/** Total mass, in units of one block of water. */
 	public double mass() {
 		return this.mass;
 	}
 
-	/** Centre of mass relative to the entity position. */
+	/** Centre of mass in structure space. */
 	public Vec3 centerOfMass() {
 		return this.centerOfMass;
 	}
 
-	public double averageDensity() {
-		return this.cells.isEmpty() ? 1.0 : this.mass / this.cells.size();
+	/** Inverse inertia tensor in the body frame. Do not mutate. */
+	public Matrix3d inverseInertia() {
+		return this.inverseInertia;
 	}
 
-	public int minY() {
-		return this.cells.keySet().stream().mapToInt(BlockPos::getY).min().orElse(0);
+	/** Contact sample points in structure space. */
+	public List<Vec3> samplePoints() {
+		return this.samplePoints;
 	}
 
-	/**
-	 * Rotates all cells by an axis-aligned rotation (a signed permutation matrix) about the centre of mass.
-	 *
-	 * @return the rotated structure and the offset the entity position must move by to keep every cell
-	 * exactly where the rotation put it.
-	 */
-	public Rotated rotate(Matrix3f rotation) {
-		Map<BlockPos, BlockState> rotated = new LinkedHashMap<>();
-		Vec3 com = this.centerOfMass;
-		Vec3 offset = null;
-		for (Map.Entry<BlockPos, BlockState> e : this.cells.entrySet()) {
-			BlockPos p = e.getKey();
-			Vector3f rel = new Vector3f((float) (p.getX() - com.x), (float) (p.getY() + 0.5 - com.y), (float) (p.getZ() - com.z));
-			rotation.transform(rel);
-			double cx = rel.x + com.x, cy = rel.y + com.y - 0.5, cz = rel.z + com.z;
-			BlockPos np = BlockPos.containing(Math.round(cx), Math.round(cy), Math.round(cz));
-			if (offset == null) {
-				offset = new Vec3(cx - np.getX(), cy - np.getY(), cz - np.getZ());
-			}
-			rotated.put(np, rotateState(e.getValue(), rotation));
-		}
-		return new Rotated(new BlockStructure(rotated), offset == null ? Vec3.ZERO : offset);
-	}
-
-	public record Rotated(BlockStructure structure, Vec3 positionOffset) {
-	}
-
-	private static BlockState rotateState(BlockState state, Matrix3f r) {
-		Vector3f up = r.transform(new Vector3f(0, 1, 0));
-		if (Math.round(up.y) == 1) {
-			Vector3f east = r.transform(new Vector3f(1, 0, 0));
-			int ex = Math.round(east.x), ez = Math.round(east.z);
-			Rotation rot = ex == 1 ? Rotation.NONE : ez == 1 ? Rotation.CLOCKWISE_90 : ex == -1 ? Rotation.CLOCKWISE_180 : Rotation.COUNTERCLOCKWISE_90;
-			return state.rotate(rot);
-		}
-		if (state.hasProperty(BlockStateProperties.AXIS)) {
-			Direction.Axis axis = state.getValue(BlockStateProperties.AXIS);
-			Vector3f v = r.transform(new Vector3f(axis == Direction.Axis.X ? 1 : 0, axis == Direction.Axis.Y ? 1 : 0, axis == Direction.Axis.Z ? 1 : 0));
-			Direction.Axis newAxis = Math.abs(v.x) > 0.5F ? Direction.Axis.X : Math.abs(v.y) > 0.5F ? Direction.Axis.Y : Direction.Axis.Z;
-			return state.setValue(BlockStateProperties.AXIS, newAxis);
-		}
-		return state;
+	/** Radius of a sphere around the centre of mass that contains the whole body. */
+	public double radius() {
+		return this.radius;
 	}
 
 	@Override

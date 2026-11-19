@@ -42,7 +42,7 @@ public final class RealisticPlacement {
 		}
 
 		BlockState state = RealisticBlockEntity.placementState(blockItem.getBlock(), hit.getDirection());
-		RealisticBlockEntity entity = new RealisticBlockEntity(level, target.getX() + 0.5, target.getY(), target.getZ() + 0.5, BlockStructure.single(state));
+		RealisticBlockEntity entity = new RealisticBlockEntity(level, net.minecraft.world.phys.Vec3.atCenterOf(target), BlockStructure.single(state));
 		level.addFreshEntity(entity);
 
 		SoundType sound = state.getSoundType();

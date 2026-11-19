@@ -22,6 +22,7 @@ public class RealisticIficator implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		FabricEntityDataRegistry.register(id("block_structure"), BlockStructure.SERIALIZER);
+		FabricEntityDataRegistry.register(id("body_pose"), io.github.uddinnadd.realisticificator.entity.BodyPose.SERIALIZER);
 		ModComponents.init();
 		ModItems.init();
 		ModEntities.init();

@@ -2,7 +2,13 @@ package io.github.uddinnadd.realisticificator.entity;
 
 import io.github.uddinnadd.realisticificator.item.RealisticItems;
 import io.github.uddinnadd.realisticificator.physics.Densities;
+import io.github.uddinnadd.realisticificator.physics.Materials;
+import io.github.uddinnadd.realisticificator.registry.ModEntities;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
+import it.unimi.dsi.fastutil.ints.IntSet;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import net.minecraft.core.BlockPos;
@@ -10,11 +16,9 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.particles.BlockParticleOption;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.syncher.EntityDataAccessor;
-import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.tags.FluidTags;
@@ -27,7 +31,6 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.MoverType;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.BlockItem;
@@ -44,54 +47,85 @@ import net.minecraft.world.level.storage.ValueOutput;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
-import net.minecraft.world.phys.shapes.VoxelShape;
-import org.joml.Matrix3f;
+import org.joml.Matrix3d;
+import org.joml.Quaterniond;
 import org.joml.Quaternionf;
-import org.joml.Vector3f;
+import org.joml.Vector3d;
 import org.jspecify.annotations.Nullable;
 
 /**
  * A "realistic" block: a server-simulated rigid body made of one or more block cells.
  * <p>
- * Collision stays axis aligned so players and other entities can stand on it. Tumbling is a visual
- * rotation that, once the body comes to rest, snaps to the nearest 90° orientation and is baked into
- * the cells, so the collision shape always matches what you see when it is still.
+ * Each tick runs 4-16 physics substeps (more when moving fast, so nothing tunnels): gravity and per-cell buoyancy, contact detection against
+ * world blocks and other bodies, positional correction, then a sequential-impulse solver with friction and
+ * restitution. Orientation is fully continuous; nothing is snapped or animated.
+ * <p>
+ * The entity position is the centre of mass.
  */
 public class RealisticBlockEntity extends Entity {
 	public static final int MAX_CELLS = 64;
 	private static final double GRAVITY = 0.04;
+	private static final int MIN_SUBSTEPS = 4;
+	private static final int MAX_SUBSTEPS = 16;
+	/** Furthest any point may travel in one substep; keeps penetration well under half a block. */
+	private static final double MAX_STEP_TRAVEL = 0.15;
+	private static final int SOLVER_ITERATIONS = 8;
+	private static final double SLOP = 0.004;
+	private static final double BOUNCE_THRESHOLD = 0.06;
+	private static final double MAX_SPEED = 2.5;
+	private static final double MAX_SPIN = 1.2;
+	/** Mass given to mobs and players standing on a body, so they can weigh down see-saws. */
+	private static final double ENTITY_MASS = 0.4;
 	private static final int LEVEL_EVENT_BLOCK_BREAK = 2001;
+	private static final Vector3d UP = new Vector3d(0, 1, 0);
+	private static final Vector3d DOWN = new Vector3d(0, -1, 0);
 
 	private static final EntityDataAccessor<BlockStructure> DATA_STRUCTURE = SynchedEntityData.defineId(RealisticBlockEntity.class, BlockStructure.SERIALIZER);
-	private static final EntityDataAccessor<org.joml.Quaternionfc> DATA_ORIENTATION = SynchedEntityData.defineId(RealisticBlockEntity.class, EntityDataSerializers.QUATERNION);
+	private static final EntityDataAccessor<BodyPose> DATA_POSE = SynchedEntityData.defineId(RealisticBlockEntity.class, BodyPose.SERIALIZER);
 
-	// No initializer on purpose: makeBoundingBox() runs inside the Entity constructor before field initializers.
+	// No initializers on these: makeBoundingBox() runs inside the Entity constructor, before field initializers.
 	private @Nullable BlockStructure structure;
-	private @Nullable List<AABB> cachedCellBoxes;
-	private @Nullable Vec3 cachedCellBoxesPos;
+	private @Nullable Quaterniond orientation;
+	private @Nullable List<AABB> cachedBoxes;
+	private @Nullable Vec3 cachedBoxesPos;
+	private @Nullable Quaterniond cachedBoxesRot;
 
-	private final Quaternionf orientation = new Quaternionf();
-	private final Vector3f angularVelocity = new Vector3f();
-	private int tipTicks;
+	private final Vector3d linearVelocity = new Vector3d();
+	private final Vector3d angularVelocity = new Vector3d();
+	private double dt = 1.0 / MIN_SUBSTEPS;
+	private boolean asleep;
+	private int stillTicks;
+	private IntSet standingIds = new IntOpenHashSet();
 
-	private final Quaternionf renderRotationO = new Quaternionf();
-	private final Quaternionf renderRotation = new Quaternionf();
+	// Per-tick scratch state (server only).
+	private final Map<BlockPos, BlockInfo> blockCache = new HashMap<>();
+	private List<RealisticBlockEntity> nearbyBodies = List.of();
+	private final Map<RealisticBlockEntity, Matrix3d> otherInverseInertia = new IdentityHashMap<>();
+
+	// Client interpolation between the last two received poses.
+	private boolean clientPoseInitialized;
+	private Vec3 prevRenderPos = Vec3.ZERO;
+	private Vec3 curRenderPos = Vec3.ZERO;
+	private final Quaternionf prevRenderRot = new Quaternionf();
+	private final Quaternionf curRenderRot = new Quaternionf();
 
 	public RealisticBlockEntity(EntityType<? extends RealisticBlockEntity> type, Level level) {
 		super(type, level);
 		this.blocksBuilding = true;
+		if (this.orientation == null) {
+			this.orientation = new Quaterniond();
+		}
 	}
 
-	public RealisticBlockEntity(Level level, double x, double y, double z, BlockStructure structure) {
-		this(io.github.uddinnadd.realisticificator.registry.ModEntities.REALISTIC_BLOCK, level);
+	public RealisticBlockEntity(Level level, Vec3 centerOfMass, BlockStructure structure) {
+		this(ModEntities.REALISTIC_BLOCK, level);
 		this.setStructure(structure);
-		this.setPos(x, y, z);
-		this.xo = x;
-		this.yo = y;
-		this.zo = z;
+		this.setPos(centerOfMass);
+		this.setOldPos();
+		this.syncPose();
 	}
 
-	// ---------------------------------------------------------------- structure & shape
+	// ================================================================ structure, pose & shape
 
 	public BlockStructure getStructure() {
 		return this.structure == null ? BlockStructure.EMPTY : this.structure;
@@ -99,9 +133,48 @@ public class RealisticBlockEntity extends Entity {
 
 	public void setStructure(BlockStructure structure) {
 		this.structure = structure;
-		this.cachedCellBoxes = null;
+		this.cachedBoxes = null;
 		this.entityData.set(DATA_STRUCTURE, structure);
 		this.setBoundingBox(this.makeBoundingBox());
+	}
+
+	private Quaterniond rot() {
+		if (this.orientation == null) {
+			this.orientation = new Quaterniond();
+		}
+		return this.orientation;
+	}
+
+	public void setOrientation(Quaterniond q) {
+		this.rot().set(q).normalize();
+		this.cachedBoxes = null;
+		this.setBoundingBox(this.makeBoundingBox());
+	}
+
+	private Matrix3d rotationMatrix() {
+		return new Matrix3d().set(this.rot());
+	}
+
+	private double inverseMass() {
+		return 1.0 / this.getStructure().mass();
+	}
+
+	private Matrix3d worldInverseInertia(Matrix3d r) {
+		return new Matrix3d(r).mul(this.getStructure().inverseInertia()).mul(new Matrix3d(r).transpose());
+	}
+
+	/** Structure-space point to world. */
+	public Vec3 toWorld(double sx, double sy, double sz, Matrix3d r) {
+		Vec3 com = this.getStructure().centerOfMass();
+		Vector3d v = r.transform(new Vector3d(sx - com.x, sy - com.y, sz - com.z));
+		return new Vec3(this.getX() + v.x, this.getY() + v.y, this.getZ() + v.z);
+	}
+
+	/** World point to structure space. */
+	public Vec3 toStructure(Vec3 world, Matrix3d r) {
+		Vec3 com = this.getStructure().centerOfMass();
+		Vector3d v = r.transformTranspose(new Vector3d(world.x - this.getX(), world.y - this.getY(), world.z - this.getZ()));
+		return new Vec3(v.x + com.x, v.y + com.y, v.z + com.z);
 	}
 
 	@Override
@@ -110,138 +183,296 @@ public class RealisticBlockEntity extends Entity {
 		if (s == null || s.isEmpty()) {
 			return super.makeBoundingBox(position);
 		}
-		AABB box = null;
+		Matrix3d r = new Matrix3d().set(this.orientation == null ? new Quaterniond() : this.orientation);
+		double hx = 0.5 * (Math.abs(r.m00) + Math.abs(r.m10) + Math.abs(r.m20));
+		double hy = 0.5 * (Math.abs(r.m01) + Math.abs(r.m11) + Math.abs(r.m21));
+		double hz = 0.5 * (Math.abs(r.m02) + Math.abs(r.m12) + Math.abs(r.m22));
+		Vec3 com = s.centerOfMass();
+		double minX = Double.POSITIVE_INFINITY, minY = minX, minZ = minX, maxX = Double.NEGATIVE_INFINITY, maxY = maxX, maxZ = maxX;
 		for (BlockPos c : s.cells().keySet()) {
-			AABB cell = cellBox(position, c);
-			box = box == null ? cell : box.minmax(cell);
+			Vector3d w = r.transform(new Vector3d(c.getX() - com.x, c.getY() - com.y, c.getZ() - com.z));
+			minX = Math.min(minX, w.x - hx);
+			minY = Math.min(minY, w.y - hy);
+			minZ = Math.min(minZ, w.z - hz);
+			maxX = Math.max(maxX, w.x + hx);
+			maxY = Math.max(maxY, w.y + hy);
+			maxZ = Math.max(maxZ, w.z + hz);
 		}
-		return box;
+		return new AABB(position.x + minX, position.y + minY, position.z + minZ, position.x + maxX, position.y + maxY, position.z + maxZ);
 	}
 
-	private static AABB cellBox(Vec3 origin, BlockPos c) {
-		double x = origin.x + c.getX() - 0.5, y = origin.y + c.getY(), z = origin.z + c.getZ() - 0.5;
-		return new AABB(x, y, z, x + 1.0, y + 1.0, z + 1.0);
-	}
-
-	/** World-space boxes of every cell; used for precise entity collision (see LevelMixin). */
-	public List<AABB> getCellBoxes() {
+	/**
+	 * Axis-aligned boxes approximating the (possibly rotated) body, used for entity collisions (see LevelMixin).
+	 * Nearly axis-aligned bodies use one box per cell; tilted ones use eight smaller boxes per cell for a tighter fit.
+	 */
+	public List<AABB> getCollisionBoxes() {
 		Vec3 pos = this.position();
-		if (this.cachedCellBoxes == null || !pos.equals(this.cachedCellBoxesPos)) {
-			List<AABB> boxes = new ArrayList<>(this.getStructure().size());
-			for (BlockPos c : this.getStructure().cells().keySet()) {
-				boxes.add(cellBox(pos, c));
-			}
-			this.cachedCellBoxes = boxes;
-			this.cachedCellBoxesPos = pos;
+		Quaterniond q = this.rot();
+		if (this.cachedBoxes != null && pos.equals(this.cachedBoxesPos) && q.equals(this.cachedBoxesRot)) {
+			return this.cachedBoxes;
 		}
-		return this.cachedCellBoxes;
+		BlockStructure s = this.getStructure();
+		Matrix3d r = new Matrix3d().set(q);
+		double ex = Math.abs(r.m00) + Math.abs(r.m10) + Math.abs(r.m20);
+		double ey = Math.abs(r.m01) + Math.abs(r.m11) + Math.abs(r.m21);
+		double ez = Math.abs(r.m02) + Math.abs(r.m12) + Math.abs(r.m22);
+		boolean aligned = ex < 1.03 && ey < 1.03 && ez < 1.03;
+		List<AABB> boxes = new ArrayList<>();
+		for (BlockPos c : s.cells().keySet()) {
+			if (aligned) {
+				Vec3 w = this.toWorld(c.getX(), c.getY(), c.getZ(), r);
+				boxes.add(new AABB(w.x - ex / 2, w.y - ey / 2, w.z - ez / 2, w.x + ex / 2, w.y + ey / 2, w.z + ez / 2));
+				continue;
+			}
+			if (isBuried(s, c)) {
+				continue;
+			}
+			for (int i = 0; i < 8; i++) {
+				Vec3 w = this.toWorld(c.getX() + ((i & 1) == 0 ? -0.25 : 0.25), c.getY() + ((i & 2) == 0 ? -0.25 : 0.25), c.getZ() + ((i & 4) == 0 ? -0.25 : 0.25), r);
+				boxes.add(new AABB(w.x - ex / 4, w.y - ey / 4, w.z - ez / 4, w.x + ex / 4, w.y + ey / 4, w.z + ez / 4));
+			}
+		}
+		this.cachedBoxes = List.copyOf(boxes);
+		this.cachedBoxesPos = pos;
+		this.cachedBoxesRot = new Quaterniond(q);
+		return this.cachedBoxes;
 	}
 
-	public Vec3 getWorldCenterOfMass() {
-		return this.position().add(this.getStructure().centerOfMass());
+	private static boolean isBuried(BlockStructure s, BlockPos c) {
+		for (Direction d : Direction.values()) {
+			if (!s.contains(c.relative(d))) {
+				return false;
+			}
+		}
+		return true;
 	}
 
-	// ---------------------------------------------------------------- synced data
+	// ================================================================ synced data
 
 	@Override
 	protected void defineSynchedData(SynchedEntityData.Builder builder) {
 		builder.define(DATA_STRUCTURE, BlockStructure.EMPTY);
-		builder.define(DATA_ORIENTATION, new Quaternionf());
+		builder.define(DATA_POSE, BodyPose.ORIGIN);
 	}
 
 	@Override
 	public void onSyncedDataUpdated(EntityDataAccessor<?> accessor) {
 		super.onSyncedDataUpdated(accessor);
+		if (!this.level().isClientSide()) {
+			return;
+		}
 		if (DATA_STRUCTURE.equals(accessor)) {
 			this.structure = this.entityData.get(DATA_STRUCTURE);
-			this.cachedCellBoxes = null;
+			this.cachedBoxes = null;
+			// Growing shifts the centre of mass, so the next pose jumps; don't interpolate across that.
+			this.clientPoseInitialized = false;
 			this.setBoundingBox(this.makeBoundingBox());
-			// Structure changes come with a baked rotation; don't interpolate across that jump.
-			this.renderRotation.set(this.entityData.get(DATA_ORIENTATION));
-			this.renderRotationO.set(this.renderRotation);
 		}
 	}
 
-	public Quaternionf getRenderOrientation(float partialTicks, Quaternionf dest) {
-		return this.renderRotationO.slerp(this.renderRotation, partialTicks, dest);
+	private void syncPose() {
+		Quaterniond q = this.rot();
+		this.entityData.set(DATA_POSE, new BodyPose(this.position(), new Quaternionf((float) q.x, (float) q.y, (float) q.z, (float) q.w)));
 	}
 
-	// ---------------------------------------------------------------- ticking / physics
+	public Vec3 getRenderPosition(float partialTicks) {
+		return this.prevRenderPos.lerp(this.curRenderPos, partialTicks);
+	}
+
+	public Quaternionf getRenderRotation(float partialTicks, Quaternionf dest) {
+		return this.prevRenderRot.slerp(this.curRenderRot, partialTicks, dest);
+	}
+
+	// ================================================================ ticking
 
 	@Override
 	public void tick() {
 		super.tick();
 		if (this.level().isClientSide()) {
-			this.renderRotationO.set(this.renderRotation);
-			this.renderRotation.set(this.entityData.get(DATA_ORIENTATION));
+			this.clientTick();
 			return;
 		}
-		if (this.getStructure().isEmpty()) {
+		BlockStructure s = this.getStructure();
+		if (s.isEmpty() || this.getY() < this.level().getMinY() - 64) {
 			this.discard();
 			return;
 		}
-		this.simulate((ServerLevel) this.level());
+
+		this.blockCache.clear();
+		Vec3 oldPos = this.position();
+		Quaterniond oldRot = new Quaterniond(this.rot());
+		List<AABB> oldBoxes = this.getCollisionBoxes();
+		this.nearbyBodies = this.level().getEntitiesOfClass(RealisticBlockEntity.class, this.getBoundingBox().inflate(1.5), e -> e != this && e.isAlive());
+
+		if (this.asleep && this.tickCount % 10 == 0 && this.detectContacts(this.rotationMatrix()).isEmpty()) {
+			this.wake(); // whatever was holding it up is gone
+		}
+
+		if (!this.asleep) {
+			int contacts = 0;
+			double submerged = 0;
+			double impactSpeed = 0;
+			double travel = this.linearVelocity.length() + this.angularVelocity.length() * s.radius();
+			int substeps = Mth.clamp(Mth.ceil(travel / MAX_STEP_TRAVEL), MIN_SUBSTEPS, MAX_SUBSTEPS);
+			this.dt = 1.0 / substeps;
+			for (int i = 0; i < substeps; i++) {
+				StepResult result = this.substep();
+				contacts = result.contacts;
+				submerged = result.submerged;
+				impactSpeed = Math.max(impactSpeed, result.impactSpeed);
+			}
+			this.applyDamping(contacts > 0, submerged);
+			if (impactSpeed > 0.18) {
+				this.onImpact((ServerLevel) this.level(), impactSpeed);
+			}
+			this.updateSleep(contacts > 0);
+		}
+
+		this.interactWithEntities((ServerLevel) this.level(), oldPos, oldRot, oldBoxes);
+		this.setDeltaMovement(new Vec3(this.linearVelocity.x, this.linearVelocity.y, this.linearVelocity.z));
+		this.syncPose();
 	}
 
-	private void simulate(ServerLevel level) {
-		BlockStructure s = this.getStructure();
-		double mass = s.mass();
-		Vec3 pos = this.position();
-
-		// Buoyancy: per-cell submerged fraction times fluid density (Archimedes).
-		double displaced = 0.0;
-		double submerged = 0.0;
-		for (BlockPos c : s.cells().keySet()) {
-			double cx = pos.x + c.getX(), minY = pos.y + c.getY(), cz = pos.z + c.getZ();
-			double water = this.fluidSurface(cx, minY + 0.05, cz, FluidTags.WATER);
-			if (!Double.isNaN(water)) {
-				double f = Mth.clamp(water - minY, 0.0, 1.0);
-				displaced += f * Densities.WATER;
-				submerged += f;
-				continue;
-			}
-			double lava = this.fluidSurface(cx, minY + 0.05, cz, FluidTags.LAVA);
-			if (!Double.isNaN(lava)) {
-				double f = Mth.clamp(lava - minY, 0.0, 1.0);
-				displaced += f * Densities.LAVA;
-				submerged += f;
+	private void clientTick() {
+		BodyPose target = this.entityData.get(DATA_POSE);
+		Player local = null;
+		for (Player p : this.level().players()) {
+			if (p.isLocalPlayer() && p.distanceToSqr(this) < 64 * 64) {
+				local = p;
 			}
 		}
-		double submergedFraction = submerged / s.size();
-		boolean inFluid = submergedFraction > 0.0;
+		boolean standing = local != null && this.isStandingOn(local, this.getCollisionBoxes());
+		Vec3 oldPos = this.position();
+		Quaterniond oldRot = new Quaterniond(this.rot());
 
-		Vec3 v = this.getDeltaMovement().add(0.0, -GRAVITY + GRAVITY * displaced / mass, 0.0);
-		if (inFluid) {
-			v = new Vec3(v.x * 0.9, v.y * 0.82, v.z * 0.9);
+		if (!this.clientPoseInitialized) {
+			this.curRenderPos = target.position();
+			this.curRenderRot.set(target.rotation());
+			this.clientPoseInitialized = true;
 		}
-		v = v.add(this.entityPushes(level, mass));
-		this.setDeltaMovement(v);
+		this.prevRenderPos = this.curRenderPos;
+		this.prevRenderRot.set(this.curRenderRot);
+		this.curRenderPos = target.position();
+		this.curRenderRot.set(target.rotation());
 
-		boolean wasOnGround = this.onGround();
-		double fallSpeed = -v.y;
-		this.move(MoverType.SELF, this.getDeltaMovement());
-		v = this.getDeltaMovement();
+		this.rot().set(this.curRenderRot.x, this.curRenderRot.y, this.curRenderRot.z, this.curRenderRot.w);
+		this.setPos(this.curRenderPos);
 
-		if (this.onGround()) {
-			if (!wasOnGround && fallSpeed > 0.2) {
-				this.onLanded(level, fallSpeed);
-				v = this.getDeltaMovement();
+		if (local != null && !local.isSpectator()) {
+			if (standing) {
+				carry(local, oldPos, oldRot, this.position(), this.rot());
+			} else {
+				pushOut(local, this.getCollisionBoxes());
 			}
-			if (this.tipTicks <= 0) {
-				double friction = level.getBlockState(this.getBlockPosBelowThatAffectsMyMovement()).getBlock().getFriction() * 0.85;
-				v = new Vec3(v.x * friction, v.y, v.z * friction);
+		}
+	}
+
+	private record StepResult(int contacts, double submerged, double impactSpeed) {
+	}
+
+	private StepResult substep() {
+		Matrix3d r = this.rotationMatrix();
+		Matrix3d invI = this.worldInverseInertia(r);
+		this.otherInverseInertia.clear();
+
+		this.linearVelocity.y -= GRAVITY * this.dt;
+		double submerged = this.applyBuoyancy(r, invI);
+
+		List<Contact> contacts = this.detectContacts(r);
+		if (!contacts.isEmpty()) {
+			this.correctPosition(contacts);
+		}
+		double impact = contacts.isEmpty() ? 0 : this.solveVelocities(contacts, invI);
+		this.integrate();
+		return new StepResult(contacts.size(), submerged, impact);
+	}
+
+	private void integrate() {
+		if (this.linearVelocity.length() > MAX_SPEED) {
+			this.linearVelocity.normalize(MAX_SPEED);
+		}
+		double spin = this.angularVelocity.length();
+		if (spin > MAX_SPIN) {
+			this.angularVelocity.normalize(MAX_SPIN);
+			spin = MAX_SPIN;
+		}
+		if (spin > 1.0E-9) {
+			Quaterniond dq = new Quaterniond().rotationAxis(spin * this.dt, this.angularVelocity.x / spin, this.angularVelocity.y / spin, this.angularVelocity.z / spin);
+			this.rot().premul(dq).normalize();
+		}
+		this.setPos(this.getX() + this.linearVelocity.x * this.dt, this.getY() + this.linearVelocity.y * this.dt, this.getZ() + this.linearVelocity.z * this.dt);
+	}
+
+	private void applyDamping(boolean touching, double submerged) {
+		if (touching) {
+			this.angularVelocity.mul(0.96); // rolling resistance
+			this.linearVelocity.mul(0.995);
+		} else {
+			this.angularVelocity.mul(0.99);
+			this.linearVelocity.mul(0.98);
+		}
+		if (submerged > 0) {
+			this.linearVelocity.mul(1.0 - 0.12 * submerged);
+			this.angularVelocity.mul(1.0 - 0.1 * submerged);
+		}
+	}
+
+	private void updateSleep(boolean touching) {
+		if (touching && this.linearVelocity.length() < 0.01 && this.angularVelocity.length() < 0.008) {
+			if (++this.stillTicks > 10) {
+				this.asleep = true;
+				this.linearVelocity.zero();
+				this.angularVelocity.zero();
 			}
 		} else {
-			v = v.scale(0.98);
+			this.stillTicks = 0;
 		}
-		this.setDeltaMovement(v);
+	}
 
-		this.updateRotation(level, inFluid);
+	public void wake() {
+		this.asleep = false;
+		this.stillTicks = 0;
+	}
+
+	public boolean isAsleep() {
+		return this.asleep;
+	}
+
+	// ================================================================ buoyancy
+
+	/** Archimedes per cell: lift equals the weight of displaced fluid, applied at the submerged part's centre. */
+	private double applyBuoyancy(Matrix3d r, Matrix3d invI) {
+		BlockStructure s = this.getStructure();
+		double submergedCells = 0;
+		for (BlockPos c : s.cells().keySet()) {
+			Vec3 wc = this.toWorld(c.getX(), c.getY(), c.getZ(), r);
+			double bottom = wc.y - 0.5;
+			double fluidDensity = Densities.WATER;
+			double surface = this.fluidSurface(wc.x, bottom + 0.05, wc.z, FluidTags.WATER);
+			if (Double.isNaN(surface)) {
+				fluidDensity = Densities.LAVA;
+				surface = this.fluidSurface(wc.x, bottom + 0.05, wc.z, FluidTags.LAVA);
+			}
+			if (Double.isNaN(surface)) {
+				continue;
+			}
+			double f = Mth.clamp(surface - bottom, 0.0, 1.0);
+			if (f <= 0) {
+				continue;
+			}
+			submergedCells += f;
+			Vector3d impulse = new Vector3d(0, GRAVITY * fluidDensity * f * this.dt, 0);
+			this.applyImpulseInternal(impulse, new Vector3d(wc.x - this.getX(), bottom + f / 2 - this.getY(), wc.z - this.getZ()), invI);
+		}
+		return submergedCells / s.size();
 	}
 
 	/** World Y of the fluid surface above (x, y, z), or NaN if that point is not inside the fluid. */
 	private double fluidSurface(double x, double y, double z, TagKey<Fluid> fluid) {
 		BlockPos pos = BlockPos.containing(x, y, z);
+		if (!this.level().hasChunkAt(pos)) {
+			return Double.NaN;
+		}
 		FluidState state = this.level().getFluidState(pos);
 		if (!state.is(fluid)) {
 			return Double.NaN;
@@ -259,194 +490,527 @@ public class RealisticBlockEntity extends Entity {
 		return top;
 	}
 
-	/** Living entities walking into the body shove it; heavier bodies barely budge. */
-	private Vec3 entityPushes(ServerLevel level, double mass) {
-		AABB box = this.getBoundingBox();
-		Vec3 com = this.getWorldCenterOfMass();
-		Vec3 total = Vec3.ZERO;
-		for (LivingEntity e : level.getEntitiesOfClass(LivingEntity.class, box.inflate(0.12, 0.0, 0.12), e -> e.isAlive() && !e.isSpectator() && !e.noPhysics)) {
-			if (e.getBoundingBox().minY >= box.maxY - 0.1) {
-				continue; // standing on top
-			}
-			Vec3 toward = new Vec3(com.x - e.getX(), 0.0, com.z - e.getZ());
-			if (toward.lengthSqr() < 1.0E-4) {
-				continue;
-			}
-			toward = toward.normalize();
-			Vec3 intent;
-			if (e instanceof ServerPlayer player) {
-				// Players are stopped by the collision, so use their movement input rather than their velocity.
-				Input input = player.getLastClientInput();
-				float forward = (input.forward() ? 1 : 0) - (input.backward() ? 1 : 0);
-				float strafe = (input.left() ? 1 : 0) - (input.right() ? 1 : 0);
-				if (forward == 0 && strafe == 0) {
-					continue;
-				}
-				float yaw = player.getYRot() * Mth.DEG_TO_RAD;
-				float sin = Mth.sin(yaw), cos = Mth.cos(yaw);
-				intent = new Vec3(strafe * cos - forward * sin, 0.0, forward * cos + strafe * sin).normalize().scale(player.isSprinting() ? 1.3 : 1.0);
-			} else {
-				intent = e.getDeltaMovement().multiply(5.0, 0.0, 5.0);
-			}
-			double along = intent.dot(toward);
-			if (along > 0.2) {
-				total = total.add(toward.scale(0.11 * along * Math.min(1.0, 1.4 / mass)));
-			}
-		}
-		return total;
-	}
+	// ================================================================ contact detection
 
-	private void onLanded(ServerLevel level, double fallSpeed) {
-		BlockState state = this.getStructure().primaryState();
-		SoundType sound = state.getSoundType();
-		this.playSound(sound.getFallSound(), (float) Math.min(1.5, 0.4 + fallSpeed), sound.getPitch() * 0.8F);
-		AABB box = this.getBoundingBox();
-		level.sendParticles(
-			new BlockParticleOption(ParticleTypes.BLOCK, state),
-			(box.minX + box.maxX) / 2, box.minY, (box.minZ + box.maxZ) / 2,
-			(int) Math.min(40, 6 * this.getStructure().size() * fallSpeed),
-			box.getXsize() / 4, 0.0, box.getZsize() / 4, 0.15
-		);
-		if (fallSpeed > 0.6) {
-			Vec3 v = this.getDeltaMovement();
-			this.setDeltaMovement(v.x, fallSpeed * 0.15, v.z);
+	private static final class Contact {
+		final Vec3 point;
+		final Vector3d normal; // points towards this body: the direction this body must move to separate
+		final double depth;
+		final double friction;
+		final double restitution;
+		final @Nullable RealisticBlockEntity other;
+		boolean otherDynamic;
+		Vector3d r;
+		@Nullable Vector3d rOther;
+		double normalMass;
+		double targetVelocity;
+		double normalImpulse;
+		final Vector3d tangentImpulse = new Vector3d();
+
+		Contact(Vec3 point, Vector3d normal, double depth, double friction, double restitution, @Nullable RealisticBlockEntity other) {
+			this.point = point;
+			this.normal = normal;
+			this.depth = depth;
+			this.friction = friction;
+			this.restitution = restitution;
+			this.other = other;
 		}
 	}
 
-	private void updateRotation(ServerLevel level, boolean inFluid) {
-		float speed = this.angularVelocity.length();
-		if (speed > 1.0E-4F) {
-			Vector3f axis = new Vector3f(this.angularVelocity).div(speed);
-			this.orientation.premul(new Quaternionf().rotationAxis(speed, axis)).normalize();
-		}
+	private record BlockInfo(BlockState state, List<AABB> boxes, boolean full) {
+	}
 
-		if (this.tipTicks > 0) {
-			this.tipTicks--;
+	private record WorldHit(double depth, Direction normal, BlockState state) {
+	}
+
+	private record BodyHit(double depth, Vector3d outwardNormal) {
+	}
+
+	private BlockInfo blockInfo(BlockPos pos) {
+		BlockInfo cached = this.blockCache.get(pos);
+		if (cached != null) {
+			return cached;
 		}
-		if (this.onGround() || inFluid) {
-			if (this.onGround() && this.isAxisAligned()) {
-				this.checkTipping(level);
-			}
-			if (this.tipTicks <= 0) {
-				this.angularVelocity.mul(this.onGround() ? 0.7F : 0.9F);
-				if (this.angularVelocity.length() < 0.08F) {
-					this.settle();
-				}
-			}
+		BlockPos p = pos.immutable();
+		BlockInfo info;
+		if (!this.level().hasChunkAt(p)) {
+			// Treat unloaded terrain as solid so bodies never fall out of the loaded world.
+			info = new BlockInfo(net.minecraft.world.level.block.Blocks.BEDROCK.defaultBlockState(), List.of(new AABB(p)), true);
 		} else {
-			this.angularVelocity.mul(0.995F);
+			BlockState state = this.level().getBlockState(p);
+			List<AABB> boxes = state.getCollisionShape(this.level(), p).toAabbs().stream().map(b -> b.move(p)).toList();
+			info = new BlockInfo(state, boxes, state.isCollisionShapeFullBlock(this.level(), p));
 		}
-
-		if (!this.entityData.get(DATA_ORIENTATION).equals(this.orientation)) {
-			this.entityData.set(DATA_ORIENTATION, new Quaternionf(this.orientation));
-		}
+		this.blockCache.put(p, info);
+		return info;
 	}
 
-	private boolean isAxisAligned() {
-		return Math.abs(this.orientation.w) > 0.9999F;
-	}
-
-	/** If the centre of mass hangs past the supported footprint, tip over that edge. */
-	private void checkTipping(ServerLevel level) {
-		BlockStructure s = this.getStructure();
-		int minCellY = s.minY();
-		double sMinX = Double.POSITIVE_INFINITY, sMinZ = Double.POSITIVE_INFINITY, sMaxX = Double.NEGATIVE_INFINITY, sMaxZ = Double.NEGATIVE_INFINITY;
-		for (BlockPos c : s.cells().keySet()) {
-			if (c.getY() != minCellY) {
-				continue;
-			}
-			AABB foot = cellBox(this.position(), c);
-			AABB probe = new AABB(foot.minX, foot.minY - 0.06, foot.minZ, foot.maxX, foot.minY, foot.maxZ);
-			List<AABB> supports = new ArrayList<>();
-			for (VoxelShape shape : level.getBlockCollisions(this, probe)) {
-				supports.addAll(shape.toAabbs());
-			}
-			for (VoxelShape shape : level.getEntityCollisions(this, probe)) {
-				supports.addAll(shape.toAabbs());
-			}
-			for (AABB support : supports) {
-				if (!support.intersects(probe)) {
-					continue;
+	/** If the world point is inside world collision, the shallowest way out (ignoring faces buried against full neighbours). */
+	private @Nullable WorldHit worldPenetration(Vec3 p) {
+		BlockPos bp = BlockPos.containing(p);
+		WorldHit best = this.worldPenetration(p, bp, bp);
+		BlockInfo below = this.blockInfo(bp.below());
+		for (AABB box : below.boxes) {
+			if (box.maxY > bp.getY()) { // fences, walls: taller than one block
+				WorldHit tall = this.worldPenetration(p, bp.below(), bp.below());
+				if (tall != null && (best == null || tall.depth < best.depth)) {
+					best = tall;
 				}
-				AABB contact = support.intersect(probe);
-				sMinX = Math.min(sMinX, contact.minX);
-				sMaxX = Math.max(sMaxX, contact.maxX);
-				sMinZ = Math.min(sMinZ, contact.minZ);
-				sMaxZ = Math.max(sMaxZ, contact.maxZ);
-			}
-		}
-		if (sMinX > sMaxX) {
-			return;
-		}
-		Vec3 com = this.getWorldCenterOfMass();
-		double cx = Mth.clamp(com.x, sMinX, sMaxX), cz = Mth.clamp(com.z, sMinZ, sMaxZ);
-		Vec3 overhang = new Vec3(com.x - cx, 0.0, com.z - cz);
-		if (overhang.lengthSqr() < 1.0E-4) {
-			return;
-		}
-		Vec3 dir = overhang.normalize();
-		// Rotating about (up x dir) swings the top of the body towards dir.
-		this.angularVelocity.set((float) dir.z, 0.0F, (float) -dir.x).mul(0.14F);
-		this.setDeltaMovement(this.getDeltaMovement().add(dir.scale(0.07)));
-		this.tipTicks = 4;
-	}
-
-	/** Ease towards the nearest 90° orientation; once there, bake it into the cells. */
-	private void settle() {
-		Matrix3f snapped = snap(this.orientation);
-		Quaternionf target = new Quaternionf().setFromNormalized(snapped);
-		float dot = Math.abs(this.orientation.dot(target));
-		if (dot > 0.99995F) {
-			this.orientation.identity();
-			this.angularVelocity.zero();
-			if (Math.abs(target.w) < 0.9999F) {
-				this.bakeRotation(snapped);
-			}
-		} else {
-			this.orientation.slerp(target, 0.35F).normalize();
-		}
-	}
-
-	private static Matrix3f snap(Quaternionf q) {
-		Matrix3f m = new Matrix3f().set(q);
-		Vector3f c0 = m.getColumn(0, new Vector3f());
-		Vector3f c1 = m.getColumn(1, new Vector3f());
-		int a0 = maxAxis(c0, -1);
-		Vector3f e0 = unit(a0, Math.signum(c0.get(a0)));
-		int a1 = maxAxis(c1, a0);
-		Vector3f e1 = unit(a1, Math.signum(c1.get(a1)));
-		Vector3f e2 = new Vector3f(e0).cross(e1);
-		return new Matrix3f(e0, e1, e2);
-	}
-
-	private static int maxAxis(Vector3f v, int exclude) {
-		int best = -1;
-		for (int i = 0; i < 3; i++) {
-			if (i != exclude && (best == -1 || Math.abs(v.get(i)) > Math.abs(v.get(best)))) {
-				best = i;
+				break;
 			}
 		}
 		return best;
 	}
 
-	private static Vector3f unit(int axis, float sign) {
-		Vector3f v = new Vector3f();
-		v.setComponent(axis, sign == 0 ? 1 : sign);
+	private @Nullable WorldHit worldPenetration(Vec3 p, BlockPos bp, BlockPos owner) {
+		BlockInfo info = this.blockInfo(owner);
+		WorldHit best = null;
+		double bestScore = Double.MAX_VALUE;
+		for (AABB box : info.boxes) {
+			if (p.x < box.minX || p.x > box.maxX || p.y < box.minY || p.y > box.maxY || p.z < box.minZ || p.z > box.maxZ) {
+				continue;
+			}
+			for (Direction d : Direction.values()) {
+				double depth;
+				boolean onBoundary;
+				switch (d) {
+					case UP -> { depth = box.maxY - p.y; onBoundary = box.maxY >= owner.getY() + 1 - 1.0E-6; }
+					case DOWN -> { depth = p.y - box.minY; onBoundary = box.minY <= owner.getY() + 1.0E-6; }
+					case EAST -> { depth = box.maxX - p.x; onBoundary = box.maxX >= owner.getX() + 1 - 1.0E-6; }
+					case WEST -> { depth = p.x - box.minX; onBoundary = box.minX <= owner.getX() + 1.0E-6; }
+					case SOUTH -> { depth = box.maxZ - p.z; onBoundary = box.maxZ >= owner.getZ() + 1 - 1.0E-6; }
+					default -> { depth = p.z - box.minZ; onBoundary = box.minZ <= owner.getZ() + 1.0E-6; }
+				}
+				if (onBoundary && this.blockInfo(owner.relative(d)).full) {
+					continue; // internal face between two solid blocks: never push out through it
+				}
+				double score = depth + (d == Direction.UP ? 0.0 : d == Direction.DOWN ? 0.1 : 0.05);
+				if (score < bestScore) {
+					bestScore = score;
+					best = new WorldHit(depth, d, info.state);
+				}
+			}
+		}
+		return best;
+	}
+
+	/**
+	 * If the structure-space point is inside the body, the shallowest exposed face to leave through.
+	 *
+	 * @param prefer world direction the outward normal is nudged towards when depths are similar
+	 * @param rejectAmbiguous ignore points sitting on an edge of the body, where the exit face is a coin toss
+	 */
+	private static @Nullable BodyHit bodyPenetration(BlockStructure s, Vec3 sp, Matrix3d r, Vector3d prefer, boolean rejectAmbiguous) {
+		int cx = Mth.floor(sp.x + 0.5), cy = Mth.floor(sp.y + 0.5), cz = Mth.floor(sp.z + 0.5);
+		if (!s.contains(cx, cy, cz)) {
+			return null;
+		}
+		double lx = sp.x - cx, ly = sp.y - cy, lz = sp.z - cz;
+		BodyHit best = null;
+		double bestScore = Double.MAX_VALUE;
+		int shallowFaces = 0;
+		for (Direction d : Direction.values()) {
+			if (s.contains(cx + d.getStepX(), cy + d.getStepY(), cz + d.getStepZ())) {
+				continue;
+			}
+			double depth = 0.5 - (lx * d.getStepX() + ly * d.getStepY() + lz * d.getStepZ());
+			if (depth < 0.03) {
+				shallowFaces++;
+			}
+			Vector3d n = r.transform(new Vector3d(d.getStepX(), d.getStepY(), d.getStepZ()));
+			double score = depth + 0.05 * (1.0 - n.dot(prefer));
+			if (score < bestScore) {
+				bestScore = score;
+				best = new BodyHit(depth, n);
+			}
+		}
+		if (rejectAmbiguous && shallowFaces >= 2) {
+			return null;
+		}
+		return best;
+	}
+
+	private List<Contact> detectContacts(Matrix3d r) {
+		BlockStructure s = this.getStructure();
+		BlockState material = s.primaryState();
+		double bodyFriction = Materials.friction(material);
+		double bodyRestitution = Materials.restitution(material);
+		List<Contact> contacts = new ArrayList<>();
+
+		// 1) Body sample points inside world blocks.
+		for (Vec3 sp : s.samplePoints()) {
+			Vec3 wp = this.toWorld(sp.x, sp.y, sp.z, r);
+			WorldHit hit = this.worldPenetration(wp);
+			if (hit != null) {
+				contacts.add(new Contact(wp, new Vector3d(hit.normal.getStepX(), hit.normal.getStepY(), hit.normal.getStepZ()), hit.depth,
+					Materials.combineFriction(bodyFriction, Materials.friction(hit.state)),
+					Materials.combineRestitution(bodyRestitution, Materials.restitution(hit.state)), null));
+			}
+		}
+
+		// 2) Corners of world collision boxes poking into the body (e.g. resting tilted across a block edge).
+		AABB region = this.getBoundingBox().inflate(0.02);
+		for (BlockPos bp : BlockPos.betweenClosed(Mth.floor(region.minX), Mth.floor(region.minY) - 1, Mth.floor(region.minZ), Mth.floor(region.maxX), Mth.floor(region.maxY), Mth.floor(region.maxZ))) {
+			BlockInfo info = this.blockInfo(bp);
+			for (AABB box : info.boxes) {
+				for (int i = 0; i < 8; i++) {
+					Vec3 corner = new Vec3((i & 1) == 0 ? box.minX : box.maxX, (i & 2) == 0 ? box.minY : box.maxY, (i & 4) == 0 ? box.minZ : box.maxZ);
+					if (!region.contains(corner)) {
+						continue;
+					}
+					BodyHit hit = bodyPenetration(s, this.toStructure(corner, r), r, DOWN, true);
+					if (hit != null) {
+						contacts.add(new Contact(corner, new Vector3d(hit.outwardNormal).negate(), hit.depth,
+							Materials.combineFriction(bodyFriction, Materials.friction(info.state)),
+							Materials.combineRestitution(bodyRestitution, Materials.restitution(info.state)), null));
+					}
+				}
+			}
+		}
+
+		// 3) Other realistic bodies, both ways round.
+		for (RealisticBlockEntity other : this.nearbyBodies) {
+			if (!other.isAlive() || !region.intersects(other.getBoundingBox())) {
+				continue;
+			}
+			BlockStructure os = other.getStructure();
+			BlockState otherMaterial = os.primaryState();
+			double friction = Materials.combineFriction(bodyFriction, Materials.friction(otherMaterial));
+			double restitution = Materials.combineRestitution(bodyRestitution, Materials.restitution(otherMaterial));
+			Matrix3d or = other.rotationMatrix();
+			AABB otherBox = other.getBoundingBox().inflate(0.01);
+			Vec3 apart = this.position().subtract(other.position());
+			if (apart.lengthSqr() < 0.35 * 0.35) {
+				// Centres nearly coincide (e.g. spawned inside each other): face tests can't pick a side, so just separate.
+				Vec3 dir = apart.lengthSqr() > 1.0E-6 ? apart.normalize() : new Vec3(0, this.getId() > other.getId() ? 1 : -1, 0);
+				contacts.add(new Contact(this.position(), new Vector3d(dir.x, dir.y, dir.z), 0.5, friction, 0.0, other));
+				continue;
+			}
+			for (Vec3 sp : s.samplePoints()) {
+				Vec3 wp = this.toWorld(sp.x, sp.y, sp.z, r);
+				if (otherBox.contains(wp)) {
+					BodyHit hit = bodyPenetration(os, other.toStructure(wp, or), or, UP, false);
+					if (hit != null) {
+						contacts.add(new Contact(wp, hit.outwardNormal, hit.depth, friction, restitution, other));
+					}
+				}
+			}
+			for (Vec3 osp : os.samplePoints()) {
+				Vec3 wp = other.toWorld(osp.x, osp.y, osp.z, or);
+				if (region.contains(wp)) {
+					BodyHit hit = bodyPenetration(s, this.toStructure(wp, r), r, DOWN, false);
+					if (hit != null) {
+						contacts.add(new Contact(wp, new Vector3d(hit.outwardNormal).negate(), hit.depth, friction, restitution, other));
+					}
+				}
+			}
+		}
+		return contacts;
+	}
+
+	// ================================================================ contact solving
+
+	private void correctPosition(List<Contact> contacts) {
+		double invM = this.inverseMass();
+		Vector3d correction = new Vector3d();
+		for (int iteration = 0; iteration < 4; iteration++) {
+			for (Contact c : contacts) {
+				double share = c.other == null || c.other.asleep ? 1.0 : invM / (invM + c.other.inverseMass());
+				double remaining = c.depth * share - correction.dot(c.normal);
+				if (remaining > SLOP) {
+					correction.fma((remaining - SLOP) * 0.5, c.normal);
+				}
+			}
+		}
+		if (correction.length() > 0.3) {
+			correction.normalize(0.3);
+		}
+		this.setPos(this.getX() + correction.x, this.getY() + correction.y, this.getZ() + correction.z);
+	}
+
+	/** Sequential impulses with accumulated clamping. Returns the hardest impact speed seen. */
+	private double solveVelocities(List<Contact> contacts, Matrix3d invI) {
+		double invM = this.inverseMass();
+		double impact = 0;
+		for (Contact c : contacts) {
+			c.r = new Vector3d(c.point.x - this.getX(), c.point.y - this.getY(), c.point.z - this.getZ());
+			c.normalMass = invM + angularTerm(invI, c.r, c.normal);
+			if (c.other != null) {
+				double relSpeed = this.relativeVelocity(c).dot(c.normal);
+				if (c.other.asleep && relSpeed < -0.15) {
+					c.other.wake();
+				}
+				c.otherDynamic = !c.other.asleep;
+				if (c.otherDynamic) {
+					c.rOther = new Vector3d(c.point.x - c.other.getX(), c.point.y - c.other.getY(), c.point.z - c.other.getZ());
+					c.normalMass += c.other.inverseMass() + angularTerm(this.otherInertia(c.other), c.rOther, c.normal);
+				}
+			}
+			double vn = this.relativeVelocity(c).dot(c.normal);
+			impact = Math.max(impact, -vn);
+			// Fade bounciness out at low speeds so slime bounces die down instead of buzzing forever.
+			double fade = Mth.clamp((-vn - BOUNCE_THRESHOLD) / 0.12, 0.0, 1.0);
+			c.targetVelocity = -c.restitution * fade * vn;
+		}
+
+		for (int iteration = 0; iteration < SOLVER_ITERATIONS; iteration++) {
+			for (Contact c : contacts) {
+				Vector3d v = this.relativeVelocity(c);
+				double vn = v.dot(c.normal);
+				double newImpulse = Math.max(c.normalImpulse + (c.targetVelocity - vn) / c.normalMass, 0.0);
+				double delta = newImpulse - c.normalImpulse;
+				c.normalImpulse = newImpulse;
+				this.applyContactImpulse(c, new Vector3d(c.normal).mul(delta), invI);
+
+				v = this.relativeVelocity(c);
+				Vector3d vt = new Vector3d(v).fma(-v.dot(c.normal), c.normal);
+				double slide = vt.length();
+				if (slide < 1.0E-9) {
+					continue;
+				}
+				Vector3d t = new Vector3d(vt).div(slide);
+				double tangentMass = this.inverseMass() + angularTerm(invI, c.r, t);
+				if (c.otherDynamic && c.rOther != null) {
+					tangentMass += c.other.inverseMass() + angularTerm(this.otherInertia(c.other), c.rOther, t);
+				}
+				Vector3d newTangent = new Vector3d(c.tangentImpulse).fma(-slide / tangentMass, t);
+				double maxFriction = c.friction * c.normalImpulse;
+				if (newTangent.length() > maxFriction) {
+					newTangent.normalize(maxFriction);
+				}
+				Vector3d tangentDelta = new Vector3d(newTangent).sub(c.tangentImpulse);
+				c.tangentImpulse.set(newTangent);
+				this.applyContactImpulse(c, tangentDelta, invI);
+			}
+		}
+		return impact;
+	}
+
+	private static double angularTerm(Matrix3d invI, Vector3d r, Vector3d n) {
+		Vector3d rn = new Vector3d(r).cross(n);
+		invI.transform(rn);
+		return rn.cross(r).dot(n);
+	}
+
+	private Matrix3d otherInertia(RealisticBlockEntity other) {
+		return this.otherInverseInertia.computeIfAbsent(other, o -> o.worldInverseInertia(o.rotationMatrix()));
+	}
+
+	private Vector3d relativeVelocity(Contact c) {
+		Vector3d v = new Vector3d(this.angularVelocity).cross(c.r).add(this.linearVelocity);
+		if (c.otherDynamic && c.rOther != null) {
+			v.sub(new Vector3d(c.other.angularVelocity).cross(c.rOther).add(c.other.linearVelocity));
+		}
 		return v;
 	}
 
-	private void bakeRotation(Matrix3f rotation) {
-		BlockStructure.Rotated rotated = this.getStructure().rotate(rotation);
-		Vec3 pos = this.position().add(rotated.positionOffset());
-		this.setStructure(rotated.structure());
-		this.setPos(pos);
-		// The visual rotation happened about the centre of mass, so the baked shape may poke into the ground.
-		for (int i = 0; i < 20 && !this.level().noCollision(this, this.getBoundingBox().deflate(1.0E-3)); i++) {
-			this.setPos(this.getX(), this.getY() + 0.1, this.getZ());
+	private void applyContactImpulse(Contact c, Vector3d impulse, Matrix3d invI) {
+		this.applyImpulseInternal(impulse, c.r, invI);
+		if (c.otherDynamic && c.rOther != null) {
+			c.other.applyImpulseInternal(new Vector3d(impulse).negate(), c.rOther, this.otherInertia(c.other));
 		}
 	}
 
-	// ---------------------------------------------------------------- interaction
+	private void applyImpulseInternal(Vector3d impulse, Vector3d r, Matrix3d invI) {
+		this.linearVelocity.fma(this.inverseMass(), impulse);
+		this.angularVelocity.add(invI.transform(new Vector3d(r).cross(impulse)));
+	}
+
+	/** Applies an impulse (mass x blocks/tick) at a world point and wakes the body. */
+	public void applyImpulse(Vec3 impulse, Vec3 worldPoint) {
+		this.wake();
+		this.applyImpulseInternal(new Vector3d(impulse.x, impulse.y, impulse.z),
+			new Vector3d(worldPoint.x - this.getX(), worldPoint.y - this.getY(), worldPoint.z - this.getZ()),
+			this.worldInverseInertia(this.rotationMatrix()));
+	}
+
+	public Vec3 velocityAt(Vec3 worldPoint) {
+		Vector3d v = new Vector3d(this.angularVelocity).cross(worldPoint.x - this.getX(), worldPoint.y - this.getY(), worldPoint.z - this.getZ()).add(this.linearVelocity);
+		return new Vec3(v.x, v.y, v.z);
+	}
+
+	private void onImpact(ServerLevel level, double speed) {
+		BlockState state = this.getStructure().primaryState();
+		SoundType sound = state.getSoundType();
+		this.playSound(sound.getFallSound(), (float) Math.min(1.5, 0.3 + speed), sound.getPitch() * 0.8F);
+		AABB box = this.getBoundingBox();
+		level.sendParticles(
+			new BlockParticleOption(ParticleTypes.BLOCK, state),
+			box.getCenter().x, box.minY, box.getCenter().z,
+			(int) Math.min(30, 8 * this.getStructure().size() * speed),
+			box.getXsize() / 4, 0.0, box.getZsize() / 4, 0.15
+		);
+	}
+
+	// ================================================================ entities on and around the body
+
+	private void interactWithEntities(ServerLevel level, Vec3 oldPos, Quaterniond oldRot, List<AABB> oldBoxes) {
+		List<AABB> boxes = this.getCollisionBoxes();
+		IntSet nowStanding = new IntOpenHashSet();
+		AABB area = this.getBoundingBox().inflate(1.0);
+		for (Entity e : level.getEntities(this, area, e -> !(e instanceof RealisticBlockEntity) && e.isAlive() && !e.isSpectator() && !e.noPhysics && !e.isPassenger())) {
+			if (this.isStandingOn(e, oldBoxes)) {
+				nowStanding.add(e.getId());
+				if (!(e instanceof Player)) {
+					carry(e, oldPos, oldRot, this.position(), this.rot());
+				}
+				if (e instanceof LivingEntity) {
+					if (this.asleep && !this.standingIds.contains(e.getId())) {
+						this.wake(); // someone just stepped on: maybe it tips now
+					}
+					if (!this.asleep) {
+						AABB eb = e.getBoundingBox();
+						Vector3d weight = new Vector3d(0, -ENTITY_MASS * GRAVITY, 0);
+						this.applyImpulseInternal(weight, new Vector3d(e.getX() - this.getX(), eb.minY - this.getY(), e.getZ() - this.getZ()), this.worldInverseInertia(this.rotationMatrix()));
+					}
+				}
+				continue;
+			}
+			if (!(e instanceof Player)) {
+				pushOut(e, boxes);
+			}
+			if (e instanceof LivingEntity living) {
+				this.hurtIfStruck(level, living, boxes);
+			}
+			if (e instanceof ServerPlayer player) {
+				this.pushedByPlayer(player, boxes);
+			}
+		}
+		this.standingIds = nowStanding;
+	}
+
+	public boolean isStandingOn(Entity e, List<AABB> boxes) {
+		AABB eb = e.getBoundingBox();
+		AABB probe = new AABB(eb.minX + 0.02, eb.minY - 0.2, eb.minZ + 0.02, eb.maxX - 0.02, eb.minY + 0.05, eb.maxZ - 0.02);
+		for (AABB box : boxes) {
+			if (box.intersects(probe) && box.maxY <= eb.minY + 0.3) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Moves an entity rigidly with the body between two poses, turning it with the body too. */
+	public static void carry(Entity e, Vec3 oldPos, Quaterniond oldRot, Vec3 newPos, Quaterniond newRot) {
+		Vec3 p = e.position();
+		Vector3d rel = oldRot.transformInverse(new Vector3d(p.x - oldPos.x, p.y - oldPos.y, p.z - oldPos.z));
+		Vector3d np = newRot.transform(rel).add(newPos.x, newPos.y, newPos.z);
+		double moved = np.distanceSquared(p.x, p.y, p.z);
+		if (moved < 1.0E-10 || moved > 4.0) {
+			return;
+		}
+		e.setPos(np.x, np.y, np.z);
+		Vector3d forward = new Quaterniond(newRot).mul(new Quaterniond(oldRot).conjugate()).transform(new Vector3d(1, 0, 0));
+		float yawDelta = (float) Math.toDegrees(Math.atan2(forward.z, forward.x));
+		if (Math.abs(yawDelta) > 1.0E-3 && Math.abs(yawDelta) < 45) {
+			e.setYRot(e.getYRot() + yawDelta);
+			if (e instanceof LivingEntity living) {
+				living.setYHeadRot(living.getYHeadRot() + yawDelta);
+				living.yBodyRot += yawDelta;
+			}
+		}
+	}
+
+	/** Shoves an entity out of the body when the body moves into it. */
+	public static void pushOut(Entity e, List<AABB> boxes) {
+		for (int i = 0; i < 4; i++) {
+			AABB eb = e.getBoundingBox().deflate(1.0E-3);
+			AABB hit = null;
+			for (AABB box : boxes) {
+				if (box.intersects(eb)) {
+					hit = box;
+					break;
+				}
+			}
+			if (hit == null) {
+				return;
+			}
+			double up = hit.maxY - eb.minY;
+			Vec3 move;
+			if (up < 0.6) {
+				move = new Vec3(0, up + 1.0E-3, 0);
+			} else {
+				double east = hit.maxX - eb.minX, west = eb.maxX - hit.minX, south = hit.maxZ - eb.minZ, north = eb.maxZ - hit.minZ;
+				double min = Math.min(Math.min(east, west), Math.min(south, north));
+				move = min == east ? new Vec3(east + 1.0E-3, 0, 0) : min == west ? new Vec3(-west - 1.0E-3, 0, 0) : min == south ? new Vec3(0, 0, south + 1.0E-3) : new Vec3(0, 0, -north - 1.0E-3);
+			}
+			e.setPos(e.position().add(move));
+		}
+	}
+
+	private void hurtIfStruck(ServerLevel level, LivingEntity living, List<AABB> boxes) {
+		AABB eb = living.getBoundingBox().inflate(0.1);
+		for (AABB box : boxes) {
+			if (!box.intersects(eb)) {
+				continue;
+			}
+			Vec3 center = eb.getCenter();
+			Vec3 v = this.velocityAt(center).subtract(living.getDeltaMovement());
+			Vec3 toward = center.subtract(this.position());
+			double speed = v.length();
+			if (speed > 0.35 && v.dot(toward) > 0) {
+				float damage = (float) Math.min(20.0, (speed - 0.3) * this.getStructure().mass() * 6.0);
+				if (living.hurtServer(level, this.damageSources().fallingBlock(this), damage)) {
+					living.push(v.x * 0.5, Math.max(0.1, v.y * 0.5), v.z * 0.5);
+				}
+			}
+			return;
+		}
+	}
+
+	/** Players walking into the body push it at the point of contact, so pushing high up tips tall bodies over. */
+	private void pushedByPlayer(ServerPlayer player, List<AABB> boxes) {
+		Input input = player.getLastClientInput();
+		float forward = (input.forward() ? 1 : 0) - (input.backward() ? 1 : 0);
+		float strafe = (input.left() ? 1 : 0) - (input.right() ? 1 : 0);
+		if (forward == 0 && strafe == 0) {
+			return;
+		}
+		AABB pb = player.getBoundingBox().inflate(0.08, 0.0, 0.08);
+		for (AABB box : boxes) {
+			if (!box.intersects(pb)) {
+				continue;
+			}
+			float yaw = player.getYRot() * Mth.DEG_TO_RAD;
+			float sin = Mth.sin(yaw), cos = Mth.cos(yaw);
+			Vec3 intent = new Vec3(strafe * cos - forward * sin, 0.0, forward * cos + strafe * sin).normalize();
+			Vec3 chest = new Vec3(player.getX(), player.getY() + 0.9, player.getZ());
+			Vec3 contact = new Vec3(Mth.clamp(chest.x, box.minX, box.maxX), Mth.clamp(chest.y, box.minY, box.maxY), Mth.clamp(chest.z, box.minZ, box.maxZ));
+			Vec3 toward = contact.subtract(chest).multiply(1, 0, 1);
+			if (toward.lengthSqr() < 1.0E-6 || intent.dot(toward.normalize()) < 0.3) {
+				return;
+			}
+			this.applyImpulse(intent.scale(player.isSprinting() ? 0.13 : 0.1), contact);
+			return;
+		}
+	}
+
+	// ================================================================ interaction: growing, hitting, breaking
+
+	/** Ray cast in structure space. The hit's block pos is the cell and its location is in structure space. */
+	private @Nullable BlockHitResult raycastCells(Vec3 fromWorld, Vec3 toWorld) {
+		Matrix3d r = this.rotationMatrix();
+		Vec3 from = this.toStructure(fromWorld, r), to = this.toStructure(toWorld, r);
+		BlockHitResult best = null;
+		double bestDist = Double.MAX_VALUE;
+		for (BlockPos c : this.getStructure().cells().keySet()) {
+			AABB box = new AABB(c.getX() - 0.5, c.getY() - 0.5, c.getZ() - 0.5, c.getX() + 0.5, c.getY() + 0.5, c.getZ() + 0.5);
+			BlockHitResult hit = AABB.clip(List.of(box), from, to, c);
+			if (hit != null) {
+				double d = hit.getLocation().distanceToSqr(from);
+				if (d < bestDist) {
+					bestDist = d;
+					best = hit;
+				}
+			}
+		}
+		return best;
+	}
+
+	private @Nullable BlockHitResult raycastFrom(Player player) {
+		Vec3 eye = player.getEyePosition();
+		return this.raycastCells(eye, eye.add(player.getViewVector(1.0F).scale(player.entityInteractionRange() + 3.0)));
+	}
 
 	@Override
 	public InteractionResult interact(Player player, InteractionHand hand, Vec3 location) {
@@ -460,42 +1024,51 @@ public class RealisticBlockEntity extends Entity {
 		if (this.level().isClientSide()) {
 			return InteractionResult.SUCCESS;
 		}
-		if (!this.isAxisAligned() || this.getStructure().size() >= MAX_CELLS) {
+		if (this.getStructure().size() >= MAX_CELLS) {
+			return InteractionResult.FAIL;
+		}
+		BlockHitResult hit = this.raycastFrom(player);
+		if (hit == null) {
+			return InteractionResult.FAIL;
+		}
+		BlockPos newCell = hit.getBlockPos().relative(hit.getDirection());
+		if (this.getStructure().contains(newCell) || !this.isFreeForNewCell(newCell)) {
 			return InteractionResult.FAIL;
 		}
 
-		Vec3 eye = player.getEyePosition();
-		Vec3 end = eye.add(player.getViewVector(1.0F).scale(player.entityInteractionRange() + 2.0));
-		BlockHitResult best = null;
-		double bestDist = Double.MAX_VALUE;
-		for (BlockPos c : this.getStructure().cells().keySet()) {
-			BlockHitResult hit = AABB.clip(List.of(cellBox(this.position(), c)), eye, end, c);
-			if (hit != null) {
-				double d = hit.getLocation().distanceToSqr(eye);
-				if (d < bestDist) {
-					bestDist = d;
-					best = hit;
-				}
-			}
-		}
-		if (best == null) {
-			return InteractionResult.FAIL;
-		}
+		BlockStructure old = this.getStructure();
+		BlockState state = placementState(blockItem.getBlock(), hit.getDirection());
+		BlockStructure grown = old.with(newCell, state);
+		Matrix3d r = this.rotationMatrix();
+		Vec3 comShift = grown.centerOfMass().subtract(old.centerOfMass());
+		Vector3d worldShift = r.transform(new Vector3d(comShift.x, comShift.y, comShift.z));
+		Vec3 newCellWorld = this.toWorld(newCell.getX(), newCell.getY(), newCell.getZ(), r);
+		// Momentum is conserved: the new block joins at rest.
+		this.linearVelocity.mul(old.mass() / grown.mass());
+		this.setStructure(grown);
+		this.setPos(this.getX() + worldShift.x, this.getY() + worldShift.y, this.getZ() + worldShift.z);
+		this.wake();
+		this.syncPose();
 
-		BlockPos newCell = best.getBlockPos().relative(best.getDirection());
-		AABB newBox = cellBox(this.position(), newCell).deflate(1.0E-3);
-		if (this.getStructure().contains(newCell)
-			|| !this.level().noCollision(this, newBox)
-			|| !this.level().getEntities(this, newBox, e -> e.isAlive() && !e.isSpectator() && (e instanceof LivingEntity || e.canBeCollidedWith(this))).isEmpty()) {
-			return InteractionResult.FAIL;
-		}
-
-		BlockState state = placementState(blockItem.getBlock(), best.getDirection());
-		this.setStructure(this.getStructure().with(newCell, state));
 		SoundType sound = state.getSoundType();
-		this.level().playSound(null, newBox.getCenter().x, newBox.getCenter().y, newBox.getCenter().z, sound.getPlaceSound(), SoundSource.BLOCKS, (sound.getVolume() + 1.0F) / 2.0F, sound.getPitch() * 0.8F);
+		this.level().playSound(null, newCellWorld.x, newCellWorld.y, newCellWorld.z, sound.getPlaceSound(), SoundSource.BLOCKS, (sound.getVolume() + 1.0F) / 2.0F, sound.getPitch() * 0.8F);
 		stack.consume(1, player);
 		return InteractionResult.SUCCESS;
+	}
+
+	private boolean isFreeForNewCell(BlockPos cell) {
+		Matrix3d r = this.rotationMatrix();
+		Vec3 center = this.toWorld(cell.getX(), cell.getY(), cell.getZ(), r);
+		for (int i = 0; i < 9; i++) {
+			Vec3 p = i == 8 ? center : this.toWorld(cell.getX() + ((i & 1) == 0 ? -0.4 : 0.4), cell.getY() + ((i & 2) == 0 ? -0.4 : 0.4), cell.getZ() + ((i & 4) == 0 ? -0.4 : 0.4), r);
+			WorldHit hit = this.worldPenetration(p);
+			if (hit != null && hit.depth > 0.02) {
+				return false;
+			}
+		}
+		this.blockCache.clear();
+		AABB space = new AABB(center, center).inflate(0.45);
+		return this.level().getEntities(this, space, e -> e.isAlive() && !e.isSpectator() && (e instanceof LivingEntity || e instanceof RealisticBlockEntity)).isEmpty();
 	}
 
 	static BlockState placementState(Block block, Direction face) {
@@ -514,23 +1087,21 @@ public class RealisticBlockEntity extends Entity {
 		if (this.isRemoved() || this.isInvulnerableToBase(source) || source.is(DamageTypeTags.IS_EXPLOSION)) {
 			return false; // explosions are handled in pushFromExplosion, which knows the blast direction
 		}
-		if (source.getDirectEntity() instanceof Player player) {
-			if (player.isSecondaryUseActive()) {
-				this.breakApart(level, !player.hasInfiniteMaterials());
-				return true;
-			}
-			double k = Math.min(1.0, 1.4 / this.getStructure().mass());
-			Vec3 look = player.getLookAngle();
-			Vec3 dir = new Vec3(look.x, 0.0, look.z);
-			dir = dir.lengthSqr() < 1.0E-4 ? Vec3.ZERO : dir.normalize();
-			this.setDeltaMovement(this.getDeltaMovement().add(dir.scale(0.45 * k)).add(0.0, 0.2 * k, 0.0));
-			this.angularVelocity.add((float) (dir.z * 0.4 * k), (float) ((this.random.nextDouble() - 0.5) * 0.2 * k), (float) (-dir.x * 0.4 * k));
-			this.needsSync = true;
-			SoundType sound = this.getStructure().primaryState().getSoundType();
-			this.playSound(sound.getHitSound(), sound.getVolume(), sound.getPitch());
+		if (!(source.getDirectEntity() instanceof Player player)) {
+			return false;
+		}
+		if (player.isSecondaryUseActive()) {
+			this.breakApart(level, !player.hasInfiniteMaterials());
 			return true;
 		}
-		return false;
+		BlockHitResult hit = this.raycastFrom(player);
+		Vec3 point = hit == null ? this.position() : this.toWorld(hit.getLocation().x, hit.getLocation().y, hit.getLocation().z, this.rotationMatrix());
+		double strength = (0.25 + 0.06 * Math.min(damage, 10.0F)) * (player.isSprinting() ? 1.5 : 1.0);
+		Vec3 impulse = player.getLookAngle().scale(strength).add(0.0, 0.08 * strength, 0.0);
+		this.applyImpulse(impulse, point);
+		SoundType sound = this.getStructure().primaryState().getSoundType();
+		this.playSound(sound.getHitSound(), sound.getVolume(), sound.getPitch());
+		return true;
 	}
 
 	/** TNT and other explosions knock the structure apart into single tumbling blocks. */
@@ -544,55 +1115,53 @@ public class RealisticBlockEntity extends Entity {
 			return;
 		}
 		BlockStructure s = this.getStructure();
-		Vec3 base = this.getDeltaMovement();
-		Vec3 pos = this.position();
-		Vec3 com = this.getWorldCenterOfMass();
-		List<RealisticBlockEntity> pieces = new ArrayList<>();
+		Matrix3d r = this.rotationMatrix();
+		if (s.size() == 1) {
+			// Hit slightly off-centre so it spins as well as flies.
+			Vec3 offset = new Vec3(this.random.nextGaussian(), this.random.nextGaussian(), this.random.nextGaussian()).scale(0.25);
+			this.applyImpulse(impulse.scale(1.6 * s.mass() / Math.sqrt(s.mass())), this.position().add(offset));
+			return;
+		}
 		for (Map.Entry<BlockPos, BlockState> cell : s.cells().entrySet()) {
 			BlockPos c = cell.getKey();
 			BlockState state = cell.getValue();
-			Vec3 center = pos.add(c.getX(), c.getY() + 0.5, c.getZ());
+			Vec3 center = this.toWorld(c.getX(), c.getY(), c.getZ(), r);
 			if (state.getBlock().getExplosionResistance() < 0.5F && power > 0.25) {
 				level.levelEvent(LEVEL_EVENT_BLOCK_BREAK, BlockPos.containing(center), Block.getId(state));
 				continue; // glass, leaves and the like shatter
 			}
-			Vec3 outward = center.subtract(com);
-			outward = outward.lengthSqr() > 1.0E-4 ? outward.normalize() : new Vec3(this.random.nextGaussian(), 0.5, this.random.nextGaussian()).normalize();
-			Vec3 velocity = base.add(impulse.scale(1.6 / Math.sqrt(Densities.of(state)))).add(outward.scale(0.3 * power)).add(0.0, 0.2 * power, 0.0);
-			RealisticBlockEntity piece = new RealisticBlockEntity(level, pos.x + c.getX(), pos.y + c.getY(), pos.z + c.getZ(), BlockStructure.single(state));
-			piece.setDeltaMovement(velocity);
-			piece.angularVelocity.set(
-				(float) (this.random.nextGaussian() * 0.35 * power),
-				(float) (this.random.nextGaussian() * 0.35 * power),
-				(float) (this.random.nextGaussian() * 0.35 * power)
+			Vec3 outward = center.subtract(this.position());
+			outward = outward.lengthSqr() > 1.0E-4 ? outward.normalize() : Vec3.ZERO;
+			Vec3 velocity = this.velocityAt(center)
+				.add(impulse.scale(1.6 / Math.sqrt(Densities.of(state))))
+				.add(outward.scale(0.3 * power))
+				.add(0.0, 0.15 * power, 0.0);
+			RealisticBlockEntity piece = new RealisticBlockEntity(level, center, BlockStructure.single(state));
+			piece.setOrientation(this.rot());
+			piece.linearVelocity.set(velocity.x, velocity.y, velocity.z);
+			piece.angularVelocity.set(this.angularVelocity).add(
+				this.random.nextGaussian() * 0.3 * power,
+				this.random.nextGaussian() * 0.3 * power,
+				this.random.nextGaussian() * 0.3 * power
 			);
-			pieces.add(piece);
+			piece.syncPose();
+			level.addFreshEntity(piece);
 		}
-
-		if (pieces.size() == 1 && s.size() == 1) {
-			RealisticBlockEntity only = pieces.getFirst();
-			this.setDeltaMovement(only.getDeltaMovement());
-			this.angularVelocity.set(only.angularVelocity);
-			this.needsSync = true;
-			return;
-		}
-		pieces.forEach(level::addFreshEntity);
 		this.discard();
 	}
 
 	private void breakApart(ServerLevel level, boolean drop) {
-		Vec3 pos = this.position();
+		Matrix3d r = this.rotationMatrix();
 		for (Map.Entry<BlockPos, BlockState> cell : this.getStructure().cells().entrySet()) {
 			BlockPos c = cell.getKey();
-			BlockPos worldPos = BlockPos.containing(pos.x + c.getX(), pos.y + c.getY() + 0.5, pos.z + c.getZ());
-			level.levelEvent(LEVEL_EVENT_BLOCK_BREAK, worldPos, Block.getId(cell.getValue()));
+			level.levelEvent(LEVEL_EVENT_BLOCK_BREAK, BlockPos.containing(this.toWorld(c.getX(), c.getY(), c.getZ(), r)), Block.getId(cell.getValue()));
 		}
 		if (drop) {
 			BlockState state = this.getStructure().primaryState();
 			int count = this.getStructure().size();
 			while (count > 0) {
 				int n = Math.min(count, state.getBlock().asItem().getDefaultMaxStackSize());
-				this.spawnAtLocation(level, RealisticItems.realisticStackOf(state, n), 0.5F);
+				this.spawnAtLocation(level, RealisticItems.realisticStackOf(state, n), 0.0F);
 				count -= n;
 			}
 		}
@@ -616,17 +1185,7 @@ public class RealisticBlockEntity extends Entity {
 
 	@Override
 	public boolean canBeCollidedWith(@Nullable Entity other) {
-		return this.isAlive();
-	}
-
-	@Override
-	public boolean canCollideWith(Entity entity) {
-		return (entity instanceof LivingEntity && !entity.isSpectator()) || super.canCollideWith(entity);
-	}
-
-	@Override
-	protected double getDefaultGravity() {
-		return GRAVITY;
+		return this.isAlive() && !(other instanceof RealisticBlockEntity);
 	}
 
 	@Override
@@ -634,22 +1193,25 @@ public class RealisticBlockEntity extends Entity {
 		return Entity.MovementEmission.NONE;
 	}
 
-	// ---------------------------------------------------------------- persistence
+	// ================================================================ persistence
 
 	@Override
 	protected void addAdditionalSaveData(ValueOutput output) {
+		Quaterniond q = this.rot();
 		output.store("Structure", BlockStructure.CODEC, this.getStructure());
-		output.store("Orientation", ExtraCodecs.QUATERNIONF, new Quaternionf(this.orientation));
-		output.putFloat("SpinX", this.angularVelocity.x);
-		output.putFloat("SpinY", this.angularVelocity.y);
-		output.putFloat("SpinZ", this.angularVelocity.z);
+		output.store("Orientation", ExtraCodecs.QUATERNIONF, new Quaternionf((float) q.x, (float) q.y, (float) q.z, (float) q.w));
+		output.store("LinearVelocity", Vec3.CODEC, new Vec3(this.linearVelocity.x, this.linearVelocity.y, this.linearVelocity.z));
+		output.store("AngularVelocity", Vec3.CODEC, new Vec3(this.angularVelocity.x, this.angularVelocity.y, this.angularVelocity.z));
+		output.putBoolean("Asleep", this.asleep);
 	}
 
 	@Override
 	protected void readAdditionalSaveData(ValueInput input) {
 		input.read("Structure", BlockStructure.CODEC).ifPresent(this::setStructure);
-		input.read("Orientation", ExtraCodecs.QUATERNIONF).ifPresent(this.orientation::set);
-		this.angularVelocity.set(input.getFloatOr("SpinX", 0.0F), input.getFloatOr("SpinY", 0.0F), input.getFloatOr("SpinZ", 0.0F));
-		this.entityData.set(DATA_ORIENTATION, new Quaternionf(this.orientation));
+		input.read("Orientation", ExtraCodecs.QUATERNIONF).ifPresent(q -> this.setOrientation(new Quaterniond(q.x(), q.y(), q.z(), q.w())));
+		input.read("LinearVelocity", Vec3.CODEC).ifPresent(v -> this.linearVelocity.set(v.x, v.y, v.z));
+		input.read("AngularVelocity", Vec3.CODEC).ifPresent(v -> this.angularVelocity.set(v.x, v.y, v.z));
+		this.asleep = input.getBooleanOr("Asleep", false);
+		this.syncPose();
 	}
 }

@@ -13,12 +13,13 @@ import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3f;
 
-/** Draws every cell like a falling block, rotated as a whole about the centre of mass. */
+/** Draws every cell like a falling block, with the whole body rotated about its centre of mass. */
 public class RealisticBlockRenderer extends EntityRenderer<RealisticBlockEntity, RealisticBlockRenderState> {
 	public RealisticBlockRenderer(EntityRendererProvider.Context context) {
 		super(context);
-		this.shadowRadius = 0.5F;
+		this.shadowRadius = 0.0F;
 	}
 
 	@Override
@@ -29,43 +30,48 @@ public class RealisticBlockRenderer extends EntityRenderer<RealisticBlockEntity,
 	@Override
 	public void extractRenderState(RealisticBlockEntity entity, RealisticBlockRenderState state, float partialTicks) {
 		super.extractRenderState(entity, state, partialTicks);
+		// Interpolate between the last two server poses ourselves; vanilla would snap on every position packet.
+		Vec3 pos = entity.getRenderPosition(partialTicks);
+		state.x = pos.x;
+		state.y = pos.y;
+		state.z = pos.z;
+		entity.getRenderRotation(partialTicks, state.rotation);
+
 		BlockStructure structure = entity.getStructure();
-		Vec3 renderPos = new Vec3(state.x, state.y, state.z);
+		Vec3 com = structure.centerOfMass();
 		int i = 0;
 		for (Map.Entry<BlockPos, BlockState> cell : structure.cells().entrySet()) {
 			if (state.cells.size() <= i) {
 				state.cells.add(new MovingBlockRenderState());
 				state.cellOffsets.add(BlockPos.ZERO);
 			}
-			BlockPos offset = cell.getKey();
-			BlockPos lightPos = BlockPos.containing(renderPos.x + offset.getX(), renderPos.y + offset.getY() + 0.5, renderPos.z + offset.getZ());
+			BlockPos c = cell.getKey();
+			Vector3f world = state.rotation.transform(new Vector3f((float) (c.getX() - com.x), (float) (c.getY() - com.y), (float) (c.getZ() - com.z)));
+			BlockPos lightPos = BlockPos.containing(pos.x + world.x, pos.y + world.y, pos.z + world.z);
 			MovingBlockRenderState block = state.cells.get(i);
 			block.blockState = cell.getValue();
 			block.blockPos = lightPos;
-			block.randomSeedPos = offset;
+			block.randomSeedPos = c;
 			if (entity.level() instanceof ClientLevel level) {
 				block.biome = level.getBiome(lightPos);
 				block.cardinalLighting = level.cardinalLighting();
 				block.lightEngine = level.getLightEngine();
 			}
-			state.cellOffsets.set(i, offset);
+			state.cellOffsets.set(i, c);
 			i++;
 		}
 		state.cellCount = i;
-		entity.getRenderOrientation(partialTicks, state.rotation);
-		Vec3 com = structure.centerOfMass();
 		state.pivot.set((float) com.x, (float) com.y, (float) com.z);
-		this.shadowRadius = (float) Math.min(2.0, 0.5 + 0.1 * structure.size());
 	}
 
 	@Override
 	public void submit(RealisticBlockRenderState state, PoseStack poseStack, SubmitNodeCollector collector, CameraRenderState camera) {
 		poseStack.pushPose();
-		poseStack.rotateAround(state.rotation, state.pivot.x, state.pivot.y, state.pivot.z);
+		poseStack.rotate(state.rotation);
 		for (int i = 0; i < state.cellCount; i++) {
-			BlockPos offset = state.cellOffsets.get(i);
+			BlockPos c = state.cellOffsets.get(i);
 			poseStack.pushPose();
-			poseStack.translate(offset.getX() - 0.5, offset.getY(), offset.getZ() - 0.5);
+			poseStack.translate(c.getX() - state.pivot.x - 0.5F, c.getY() - state.pivot.y - 0.5F, c.getZ() - state.pivot.z - 0.5F);
 			collector.submitMovingBlock(poseStack, state.cells.get(i), state.outlineColor);
 			poseStack.popPose();
 		}
