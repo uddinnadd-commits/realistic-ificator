@@ -10,12 +10,15 @@ import io.github.uddinnadd.realisticificator.physics.WorldCollider;
 import io.github.uddinnadd.realisticificator.registry.ModEntities;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.syncher.EntityDataAccessor;
+import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -60,12 +63,16 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 	private static final double JOINT_STIFFNESS = 0.25;
 	private static final double FRICTION = 0.7;
 	private static final double RESTITUTION = 0.05;
+	private static final double SELF_FRICTION = 0.4;
+	/** Bones are shrunk by this much when testing them against each other, so touching parts don't fight. */
+	private static final double SELF_COLLISION_MARGIN = 0.03;
 	private static final double MAX_SPEED = 2.5;
 	private static final double MAX_SPIN = 1.5;
 	private static final Vector3d UP = new Vector3d(0, 1, 0);
 
 	private static final EntityDataAccessor<RagdollInfo> DATA_INFO = SynchedEntityData.defineId(RagdollEntity.class, RagdollInfo.SERIALIZER);
 	private static final EntityDataAccessor<List<BodyPose>> DATA_POSES = SynchedEntityData.defineId(RagdollEntity.class, RagdollInfo.POSES_SERIALIZER);
+	private static final EntityDataAccessor<Integer> DATA_LINK = SynchedEntityData.defineId(RagdollEntity.class, EntityDataSerializers.INT);
 
 	/** Simulation state of one bone. Position is the bone centre. */
 	public static final class Bone {
@@ -138,7 +145,21 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 	private int stillTicks;
 	private double dt = 1.0 / MIN_SUBSTEPS;
 	private @Nullable WorldCollider collider;
-	private List<RealisticBlockEntity> nearbyBodies = List.of();
+	private List<PhysicsObject> nearbyObstacles = List.of();
+
+	// Knock-down state (server). A live ragdoll has its entity riding it; recoverFrom is non-null while it does.
+	private @Nullable Vec3 recoverFrom;
+	private boolean restoreAi;
+	private int liveTicks;
+	private int restlessTicks;
+	private double fallPeakY = Double.NaN;
+	private double lastTorsoVy;
+	/** Tick at which a death corpse disappears, or -1 for corpses that stay (spawned from eggs). */
+	private int despawnAt = -1;
+
+	/** Client: ids of entities currently represented by a ragdoll, so their own model is hidden. */
+	private static final Set<Integer> CLIENT_LINKS = ConcurrentHashMap.newKeySet();
+	private int clientLink = -1;
 
 	private boolean clientInitialized;
 	private final List<BodyPose> prevPoses = new ArrayList<>();
@@ -154,31 +175,151 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		if (mob instanceof Mob m && m.isBaby()) {
 			m.setBaby(false);
 		}
-		TagValueOutput output = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, level.registryAccess());
-		mob.saveWithoutId(output);
-		CompoundTag data = output.buildResult();
-		for (String key : List.of("UUID", "Pos", "Motion", "Rotation", "Passengers", "Leash")) {
-			data.remove(key);
-		}
-		RagdollSkeleton.Kind kind = RagdollSkeleton.classify(mob);
-		RagdollInfo info = new RagdollInfo(BuiltInRegistries.ENTITY_TYPE.getKey(mob.getType()).toString(), data, kind.ordinal(), mob.getBbWidth(), mob.getBbHeight());
-
-		RagdollEntity ragdoll = new RagdollEntity(ModEntities.RAGDOLL, level);
-		ragdoll.setInfo(info);
-		if (mob.hasCustomName()) {
-			ragdoll.setCustomName(mob.getCustomName());
-		}
-		ragdoll.layOutBones(feet, yaw);
+		RagdollEntity ragdoll = create(level, mob);
+		ragdoll.layOutBones(feet, yaw, true);
 		ragdoll.setOldPos();
 		return ragdoll;
 	}
 
-	/** Lays the skeleton out with its feet at {@code feet}, facing {@code yaw}, already slumping like a corpse. */
-	private void layOutBones(Vec3 feet, float yaw) {
+	private static RagdollEntity create(ServerLevel level, LivingEntity entity) {
+		CompoundTag data;
+		if (entity instanceof Player player) {
+			// Player data is huge (inventory, advancements...); the client only needs to know whose skin to use.
+			data = new CompoundTag();
+			data.putString("player_uuid", player.getUUID().toString());
+		} else {
+			TagValueOutput output = TagValueOutput.createWithContext(ProblemReporter.DISCARDING, level.registryAccess());
+			entity.saveWithoutId(output);
+			data = output.buildResult();
+			for (String key : List.of("UUID", "Pos", "Motion", "Rotation", "Passengers", "Leash", "Inventory", "Offers", "Brain")) {
+				data.remove(key);
+			}
+		}
+		RagdollSkeleton.Kind kind = RagdollSkeleton.classify(entity);
+		RagdollInfo info = new RagdollInfo(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString(), data, kind.ordinal(), entity.getBbWidth(), entity.getBbHeight());
+		RagdollEntity ragdoll = new RagdollEntity(ModEntities.RAGDOLL, level);
+		ragdoll.setInfo(info);
+		if (entity.hasCustomName()) {
+			ragdoll.setCustomName(entity.getCustomName());
+		}
+		return ragdoll;
+	}
+
+	/**
+	 * Knocks a living entity down: it rides a new ragdoll of itself (hidden on clients) until the ragdoll settles,
+	 * then gets back up where the body ended. If it is already down, the existing ragdoll just takes the hit.
+	 */
+	public static @Nullable RagdollEntity knockDown(ServerLevel level, LivingEntity entity, Vec3 motion, Vec3 fling, @Nullable Vec3 hitFrom) {
+		if (entity.getVehicle() instanceof RagdollEntity existing) {
+			existing.fling(fling, hitFrom);
+			existing.liveTicks = Math.min(existing.liveTicks, 10); // knocked again: stay down a bit longer
+			return existing;
+		}
+		entity.stopRiding();
+		entity.ejectPassengers();
+		RagdollEntity ragdoll = create(level, entity);
+		ragdoll.layOutBones(entity.position(), entity instanceof LivingEntity l ? l.yBodyRot : entity.getYRot(), false);
+		Vec3 v = motion;
+		for (Bone bone : ragdoll.bones()) {
+			bone.linVel.set(v.x, Math.max(v.y, -1.0), v.z);
+		}
+		ragdoll.recoverFrom = entity.position();
+		ragdoll.fallPeakY = ragdoll.bones()[RagdollSkeleton.TORSO].pos.y + entity.fallDistance;
+		ragdoll.setLink(entity.getId());
+		if (entity instanceof Mob mob && !mob.isNoAi()) {
+			mob.setNoAi(true); // no attacking or wandering while knocked out
+			ragdoll.restoreAi = true;
+		}
+		ragdoll.setOldPos();
+		level.addFreshEntity(ragdoll);
+		if (!entity.startRiding(ragdoll, true, false)) {
+			ragdoll.restoreAi(entity);
+			ragdoll.discard();
+			return null;
+		}
+		ragdoll.fling(fling, hitFrom);
+		return ragdoll;
+	}
+
+	/** A body for something that just died: a fresh corpse, or its knock-down ragdoll left lying where it is. */
+	public static void onDeath(ServerLevel level, LivingEntity entity, Vec3 motion, @Nullable Vec3 fling, @Nullable Vec3 hitFrom, int lifetimeTicks) {
+		RagdollEntity ragdoll;
+		if (entity.getVehicle() instanceof RagdollEntity existing) {
+			ragdoll = existing;
+			ragdoll.restoreAi(entity);
+			ragdoll.restoreAi = false;
+			entity.stopRiding();
+		} else {
+			if (fling == null || lifetimeTicks <= 0) {
+				return;
+			}
+			ragdoll = create(level, entity);
+			ragdoll.layOutBones(entity.position(), entity.yBodyRot, false);
+			Vec3 v = motion;
+			for (Bone bone : ragdoll.bones()) {
+				bone.linVel.set(v.x, Math.max(v.y, -1.0), v.z);
+			}
+			ragdoll.setOldPos();
+			level.addFreshEntity(ragdoll);
+		}
+		// Keeps the dying entity hidden while vanilla plays its death animation.
+		ragdoll.setLink(entity.getId());
+		ragdoll.recoverFrom = null;
+		ragdoll.despawnAt = lifetimeTicks > 0 ? ragdoll.tickCount + lifetimeTicks : ragdoll.tickCount;
+		if (fling != null) {
+			ragdoll.fling(fling, hitFrom);
+		}
+	}
+
+	/** Adds a velocity to the whole body, plus a twist from where the hit came from. */
+	public void fling(Vec3 velocity, @Nullable Vec3 hitFrom) {
+		this.frozen = false;
+		this.wake();
+		Bone torso = this.bones()[RagdollSkeleton.TORSO];
+		for (Bone bone : this.bones()) {
+			bone.linVel.add(velocity.x, velocity.y, velocity.z);
+		}
+		// Hits land on the upper body, so the body spins backwards away from the hit, as well as flying.
+		Vector3d dir = new Vector3d(velocity.x, 0, velocity.z);
+		if (dir.length() > 1.0E-4) {
+			Vector3d spinAxis = new Vector3d(0, 1, 0).cross(dir.normalize());
+			double spin = Math.min(0.6, velocity.length() * 0.8);
+			for (Bone bone : this.bones()) {
+				bone.angVel.fma(spin, spinAxis);
+			}
+		}
+		if (hitFrom != null) {
+			Vector3d arm = new Vector3d(torso.pos).sub(hitFrom.x, hitFrom.y, hitFrom.z);
+			if (arm.length() > 1.0E-3) {
+				torso.angVel.add(arm.normalize().cross(0, 1, 0).mul(0.1));
+			}
+		}
+	}
+
+	private void setLink(int id) {
+		this.entityData.set(DATA_LINK, id);
+	}
+
+	/** Entity this ragdoll stands in for (knocked down, or dying), or -1. */
+	public int getLink() {
+		return this.entityData.get(DATA_LINK);
+	}
+
+	private void restoreAi(Entity entity) {
+		if (this.restoreAi && entity instanceof Mob mob) {
+			mob.setNoAi(false);
+		}
+	}
+
+	/**
+	 * Lays the skeleton out with its feet at {@code feet}, facing {@code yaw}. Corpses start slumping; knocked-down
+	 * entities start in the pose they were standing in.
+	 */
+	private void layOutBones(Vec3 feet, float yaw, boolean slumped) {
 		// A four-legged stance is stable enough to stay standing, so start corpses tipped over: quadrupeds rolled
 		// onto their side, bipeds leaning so they fold at the hips.
 		double side = this.random.nextBoolean() ? 1 : -1;
-		Quaterniond slump = switch (this.skeleton().kind) {
+		Quaterniond slump = !slumped ? new Quaterniond() : switch (this.skeleton().kind) {
 			case QUADRUPED -> new Quaterniond().rotationZ(side * 1.35);
 			case BIPED -> new Quaterniond().rotationX(side * 0.35);
 			case BLOB -> new Quaterniond();
@@ -277,6 +418,7 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 	protected void defineSynchedData(SynchedEntityData.Builder builder) {
 		builder.define(DATA_INFO, RagdollInfo.EMPTY);
 		builder.define(DATA_POSES, List.of());
+		builder.define(DATA_LINK, -1);
 	}
 
 	@Override
@@ -286,6 +428,48 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			this.rebuild(this.entityData.get(DATA_INFO));
 			this.clientInitialized = false;
 		}
+		if (DATA_LINK.equals(accessor) && this.level().isClientSide()) {
+			this.updateClientLink(this.entityData.get(DATA_LINK));
+		}
+	}
+
+	private void updateClientLink(int link) {
+		if (this.clientLink >= 0) {
+			CLIENT_LINKS.remove(this.clientLink);
+		}
+		this.clientLink = link;
+		if (link >= 0) {
+			CLIENT_LINKS.add(link);
+		}
+	}
+
+	@Override
+	public void onClientRemoval() {
+		super.onClientRemoval();
+		this.updateClientLink(-1);
+	}
+
+	/**
+	 * Client: should this entity's own model be hidden because a ragdoll is standing in for it? True while it rides
+	 * its knock-down ragdoll, or while it is dying and its corpse has taken over.
+	 */
+	public static boolean hidesOnClient(Entity entity) {
+		if (entity.getVehicle() instanceof RagdollEntity) {
+			return true;
+		}
+		return !CLIENT_LINKS.isEmpty() && CLIENT_LINKS.contains(entity.getId()) && !entity.isAlive();
+	}
+
+	@Override
+	protected void positionRider(Entity passenger, Entity.MoveFunction moveFunction) {
+		// Put the rider's eyes in the ragdoll's head, so a knocked-down player's camera rides along with it.
+		Vector3d head = this.bones()[Math.min(RagdollSkeleton.HEAD, this.bones().length - 1)].pos;
+		moveFunction.accept(passenger, head.x, head.y - passenger.getEyeHeight(), head.z);
+	}
+
+	@Override
+	protected boolean canAddPassenger(Entity passenger) {
+		return this.getPassengers().isEmpty();
 	}
 
 	private void syncPoses() {
@@ -319,7 +503,18 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			return;
 		}
 		if (!this.bonesPlaced) {
-			this.layOutBones(this.position(), this.getYRot());
+			this.layOutBones(this.position(), this.getYRot(), true);
+		}
+		if (this.despawnAt >= 0 && this.tickCount >= this.despawnAt && this.getPassengers().isEmpty()) {
+			((ServerLevel) this.level()).sendParticles(ParticleTypes.POOF, this.getX(), this.getY(), this.getZ(), 12, 0.3, 0.3, 0.3, 0.02);
+			this.discard();
+			return;
+		}
+		if (this.getLink() >= 0 && this.recoverFrom == null && this.tickCount % 20 == 0) {
+			Entity linked = this.level().getEntity(this.getLink());
+			if (linked == null || linked.isAlive()) {
+				this.setLink(-1); // the dead entity is gone (or respawned): stop hiding it
+			}
 		}
 		if (this.collider == null) {
 			this.collider = new WorldCollider(this.level());
@@ -327,7 +522,11 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		this.collider.clear();
 		Vec3 oldPos = this.position();
 		Quaterniond oldRot = new Quaterniond(this.bones()[RagdollSkeleton.TORSO].rot);
-		this.nearbyBodies = this.level().getEntitiesOfClass(RealisticBlockEntity.class, this.getBoundingBox().inflate(1.5), Entity::isAlive);
+		List<PhysicsObject> obstacles = new ArrayList<>();
+		for (Entity e : this.level().getEntities(this, this.getBoundingBox().inflate(1.5), e -> e instanceof PhysicsObject && e.isAlive())) {
+			obstacles.add((PhysicsObject) e);
+		}
+		this.nearbyObstacles = obstacles;
 
 		boolean held = this.tickCount <= this.heldUntil;
 		if (this.frozen && !held) {
@@ -358,6 +557,90 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		this.afterBonesMoved();
 		this.interactWithEntities((ServerLevel) this.level(), oldPos, oldRot);
 		this.syncPoses();
+		if (this.recoverFrom != null) {
+			this.tickKnockDown((ServerLevel) this.level());
+		}
+	}
+
+	/** While someone is knocked down: get them back up once the body has come to rest (or after a while regardless). */
+	private void tickKnockDown(ServerLevel level) {
+		Entity rider = this.getFirstPassenger();
+		if (rider == null || rider.isRemoved()) {
+			if (rider != null) {
+				this.restoreAi(rider);
+			}
+			this.discard(); // logged out, teleported away, unloaded...
+			return;
+		}
+		if (this.getLink() != rider.getId()) {
+			this.setLink(rider.getId()); // ids change across a reload
+		}
+		if (rider instanceof LivingEntity living && living.isDeadOrDying()) {
+			return; // the death event turns us into a corpse
+		}
+		this.checkLanding(rider);
+		if (rider.isRemoved() || rider instanceof LivingEntity dying && dying.isDeadOrDying()) {
+			return;
+		}
+		this.liveTicks++;
+		boolean restless = false;
+		for (Bone bone : this.bones()) {
+			if (bone.linVel.length() > 0.04 || bone.angVel.length() > 0.08) {
+				restless = true;
+				break;
+			}
+		}
+		this.restlessTicks = restless ? 0 : this.restlessTicks + 1;
+		if ((this.liveTicks > 30 && (this.asleep || this.restlessTicks > 12)) || this.liveTicks > 240) {
+			this.getUp(level, rider);
+		}
+	}
+
+	/** Hard landings hurt whoever is knocked down, as falling would, so a hit in mid-air doesn't cancel fall damage. */
+	private void checkLanding(Entity rider) {
+		Bone torso = this.bones()[RagdollSkeleton.TORSO];
+		double vy = torso.linVel.y;
+		boolean inFluid = !this.level().getFluidState(BlockPos.containing(torso.pos.x, torso.pos.y, torso.pos.z)).isEmpty();
+		this.fallPeakY = Double.isNaN(this.fallPeakY) || inFluid ? torso.pos.y : Math.max(this.fallPeakY, torso.pos.y);
+		if (this.lastTorsoVy < -0.3 && vy > this.lastTorsoVy * 0.4) {
+			double drop = this.fallPeakY - torso.pos.y;
+			this.fallPeakY = torso.pos.y;
+			rider.causeFallDamage(drop, 1.0F, this.damageSources().fall());
+		}
+		this.lastTorsoVy = vy;
+	}
+
+	private void getUp(ServerLevel level, Entity rider) {
+		Bone torso = this.bones()[RagdollSkeleton.TORSO];
+		double lowest = Double.MAX_VALUE;
+		for (Bone bone : this.bones()) {
+			lowest = Math.min(lowest, bone.worldBox().minY);
+		}
+		Vec3 fallback = this.recoverFrom;
+		this.recoverFrom = null;
+		this.restoreAi(rider);
+		rider.stopRiding();
+		this.setLink(-1);
+		this.discard();
+
+		// Stand up on the spot the body lies, nudging up out of anything solid; otherwise go back to where it was hit.
+		Vec3 spot = null;
+		for (double dy = 0; dy <= 1.5 && spot == null; dy += 0.25) {
+			Vec3 candidate = new Vec3(torso.pos.x, lowest + dy, torso.pos.z);
+			if (level.noCollision(rider, rider.getDimensions(net.minecraft.world.entity.Pose.STANDING).makeBoundingBox(candidate))) {
+				spot = candidate;
+			}
+		}
+		if (spot == null) {
+			spot = fallback;
+		}
+		if (rider instanceof ServerPlayer player) {
+			player.teleportTo(level, spot.x, spot.y, spot.z, Set.of(), player.getYRot(), player.getXRot(), false);
+		} else {
+			rider.setPos(spot);
+		}
+		rider.setDeltaMovement(Vec3.ZERO);
+		rider.resetFallDistance();
 	}
 
 	private void clientTick() {
@@ -394,7 +677,7 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 
 		Vec3 newTorso = RigidMath.vec(this.bones()[RagdollSkeleton.TORSO].pos);
 		Quaterniond newRot = this.bones()[RagdollSkeleton.TORSO].rot;
-		if (local != null && !local.isSpectator() && EntityContact.moved(oldTorso, oldRot, newTorso, newRot)) {
+		if (local != null && !local.isSpectator() && !local.isPassenger() && EntityContact.moved(oldTorso, oldRot, newTorso, newRot)) {
 			if (standing) {
 				EntityContact.carry(local, oldTorso, oldRot, newTorso, newRot);
 			} else {
@@ -454,6 +737,9 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		final @Nullable PhysicsObject obstacle;
 		final int obstaclePart;
 		Vector3d r;
+		/** Self-collision: the other bone of this ragdoll (pushed the opposite way), or -1. */
+		int otherBone = -1;
+		@Nullable Vector3d rOther;
 		double normalMass;
 		double targetVelocity;
 		double closingSpeed;
@@ -510,10 +796,15 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			Bone bone = bones[c.bone];
 			c.r = new Vector3d(c.point.x - bone.pos.x, c.point.y - bone.pos.y, c.point.z - bone.pos.z);
 			c.normalMass = 1.0 / bone.mass + RigidMath.angularTerm(invI[c.bone], c.r, c.normal);
-			double vn = bone.velocityAt(c.r).dot(c.normal);
+			if (c.otherBone >= 0) {
+				Bone other = bones[c.otherBone];
+				c.rOther = new Vector3d(c.point.x - other.pos.x, c.point.y - other.pos.y, c.point.z - other.pos.z);
+				c.normalMass += 1.0 / other.mass + RigidMath.angularTerm(invI[c.otherBone], c.rOther, c.normal);
+			}
+			double vn = this.contactVelocity(c).dot(c.normal);
 			c.closingSpeed = Math.max(0.0, -vn);
 			double fade = Mth.clamp((-vn - 0.06) / 0.12, 0.0, 1.0);
-			c.targetVelocity = -RESTITUTION * fade * vn;
+			c.targetVelocity = c.otherBone >= 0 ? 0.0 : -RESTITUTION * fade * vn;
 		}
 
 		for (int iteration = 0; iteration < SOLVER_ITERATIONS; iteration++) {
@@ -521,7 +812,7 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 				this.solveJoint(js, invI);
 			}
 			for (Contact c : contacts) {
-				this.solveContact(c, invI[c.bone]);
+				this.solveContact(c, invI);
 			}
 		}
 
@@ -589,11 +880,11 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 							contacts.add(new Contact(b, wp, new Vector3d(hit.normal().getStepX(), hit.normal().getStepY(), hit.normal().getStepZ()), hit.depth(), null, 0));
 							continue;
 						}
-						for (RealisticBlockEntity body : this.nearbyBodies) {
-							if (body.getBoundingBox().contains(wp)) {
-								Penetration pen = body.penetration(wp);
+						for (PhysicsObject obstacle : this.nearbyObstacles) {
+							if (((Entity) obstacle).getBoundingBox().contains(wp)) {
+								Penetration pen = obstacle.penetration(wp);
 								if (pen != null) {
-									contacts.add(new Contact(b, wp, RigidMath.vec(pen.outwardNormal()), pen.depth(), body, 0));
+									contacts.add(new Contact(b, wp, RigidMath.vec(pen.outwardNormal()), pen.depth(), obstacle, pen.part()));
 									break;
 								}
 							}
@@ -618,17 +909,84 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 				}
 			}
 		}
+		this.detectSelfContacts(contacts);
 		return contacts;
 	}
 
-	/** Shallowest way out of a bone for a world point; the normal is the bone's outward face normal. */
+	/**
+	 * Limbs collide with each other and with the torso, so arms can't pass through the body and legs can't cross
+	 * through each other. Bones are tested slightly shrunk so parts that merely touch at rest (arm against torso)
+	 * don't fight, and around a joint the parent and child are allowed to overlap.
+	 */
+	private void detectSelfContacts(List<Contact> contacts) {
+		Bone[] bones = this.bones();
+		for (int a = 0; a < bones.length; a++) {
+			for (int b = a + 1; b < bones.length; b++) {
+				if (!bones[a].worldBox().intersects(bones[b].worldBox())) {
+					continue;
+				}
+				RagdollSkeleton.Joint joint = this.jointBetween(a, b);
+				Vec3 pivot = null;
+				double exclusion = 0;
+				if (joint != null) {
+					// Joint pivot in world space, via the parent's rest-to-current transform.
+					Vec3 rest = joint.pivot().subtract(this.skeleton().bones.get(joint.parent()).center());
+					pivot = bones[joint.parent()].toWorld(rest);
+					Vector3d childHalf = bones[joint.child()].half;
+					exclusion = 0.55 * Math.max(childHalf.x, Math.max(childHalf.y, childHalf.z));
+				}
+				this.addSelfContacts(contacts, a, b, pivot, exclusion);
+				this.addSelfContacts(contacts, b, a, pivot, exclusion);
+			}
+		}
+	}
+
+	/** Sample points of bone {@code a} inside bone {@code b}: contacts that push {@code a} out of {@code b}. */
+	private void addSelfContacts(List<Contact> contacts, int a, int b, @Nullable Vec3 pivot, double exclusion) {
+		Bone bone = this.bones()[a];
+		for (double sx : SAMPLE) {
+			for (double sy : SAMPLE) {
+				for (double sz : SAMPLE) {
+					if (sx == 0 && sy == 0 && sz == 0) {
+						continue;
+					}
+					Vec3 wp = bone.toWorld(new Vec3(sx * bone.half.x, sy * bone.half.y, sz * bone.half.z));
+					if (pivot != null && wp.distanceTo(pivot) < exclusion) {
+						continue;
+					}
+					Penetration pen = this.bonePenetration(b, wp, UP, false, SELF_COLLISION_MARGIN);
+					if (pen != null) {
+						Contact c = new Contact(a, wp, RigidMath.vec(pen.outwardNormal()), pen.depth(), null, 0);
+						c.otherBone = b;
+						contacts.add(c);
+					}
+				}
+			}
+		}
+	}
+
+	private RagdollSkeleton.@Nullable Joint jointBetween(int a, int b) {
+		for (RagdollSkeleton.Joint joint : this.skeleton().joints) {
+			if ((joint.parent() == a && joint.child() == b) || (joint.parent() == b && joint.child() == a)) {
+				return joint;
+			}
+		}
+		return null;
+	}
+
 	private @Nullable Penetration bonePenetration(int b, Vec3 world, Vector3d prefer, boolean rejectAmbiguous) {
+		return this.bonePenetration(b, world, prefer, rejectAmbiguous, 0.0);
+	}
+
+	/** Shallowest way out of a bone (shrunk by {@code margin}) for a world point; the normal is the bone's outward face normal. */
+	private @Nullable Penetration bonePenetration(int b, Vec3 world, Vector3d prefer, boolean rejectAmbiguous, double margin) {
 		Bone bone = this.bones()[b];
 		Vec3 l = bone.toLocal(world);
-		if (Math.abs(l.x) > bone.half.x || Math.abs(l.y) > bone.half.y || Math.abs(l.z) > bone.half.z) {
+		double hx = bone.half.x - margin, hy = bone.half.y - margin, hz = bone.half.z - margin;
+		if (hx <= 0 || hy <= 0 || hz <= 0 || Math.abs(l.x) > hx || Math.abs(l.y) > hy || Math.abs(l.z) > hz) {
 			return null;
 		}
-		double[] depths = {bone.half.x - l.x, bone.half.x + l.x, bone.half.y - l.y, bone.half.y + l.y, bone.half.z - l.z, bone.half.z + l.z};
+		double[] depths = {hx - l.x, hx + l.x, hy - l.y, hy + l.y, hz - l.z, hz + l.z};
 		Vector3d[] axes = {new Vector3d(1, 0, 0), new Vector3d(-1, 0, 0), new Vector3d(0, 1, 0), new Vector3d(0, -1, 0), new Vector3d(0, 0, 1), new Vector3d(0, 0, -1)};
 		int best = -1;
 		double bestScore = Double.MAX_VALUE;
@@ -658,6 +1016,16 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		}
 		for (int iteration = 0; iteration < 4; iteration++) {
 			for (Contact c : contacts) {
+				if (c.otherBone >= 0) {
+					// Both bones are free: split the push between them.
+					double remaining = c.depth - (corrections[c.bone].dot(c.normal) - corrections[c.otherBone].dot(c.normal));
+					if (remaining > SLOP) {
+						double move = (remaining - SLOP) * 0.25;
+						corrections[c.bone].fma(move, c.normal);
+						corrections[c.otherBone].fma(-move, c.normal);
+					}
+					continue;
+				}
 				double remaining = c.depth * (c.obstacle != null ? 0.7 : 1.0) - corrections[c.bone].dot(c.normal);
 				if (remaining > SLOP) {
 					corrections[c.bone].fma((remaining - SLOP) * 0.5, c.normal);
@@ -722,31 +1090,49 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		}
 	}
 
-	private void solveContact(Contact c, Matrix3d invI) {
-		Bone bone = this.bones()[c.bone];
-		Vector3d v = bone.velocityAt(c.r);
+	private Vector3d contactVelocity(Contact c) {
+		Vector3d v = this.bones()[c.bone].velocityAt(c.r);
+		if (c.otherBone >= 0 && c.rOther != null) {
+			v.sub(this.bones()[c.otherBone].velocityAt(c.rOther));
+		}
+		return v;
+	}
+
+	private void applyContactImpulse(Contact c, Vector3d impulse, Matrix3d[] invI) {
+		this.bones()[c.bone].applyImpulse(impulse, c.r, invI[c.bone]);
+		if (c.otherBone >= 0 && c.rOther != null) {
+			this.bones()[c.otherBone].applyImpulse(new Vector3d(impulse).negate(), c.rOther, invI[c.otherBone]);
+		}
+	}
+
+	private void solveContact(Contact c, Matrix3d[] invI) {
+		Vector3d v = this.contactVelocity(c);
 		double vn = v.dot(c.normal);
 		double newImpulse = Math.max(c.normalImpulse + (c.targetVelocity - vn) / c.normalMass, 0.0);
 		double delta = newImpulse - c.normalImpulse;
 		c.normalImpulse = newImpulse;
-		bone.applyImpulse(new Vector3d(c.normal).mul(delta), c.r, invI);
+		this.applyContactImpulse(c, new Vector3d(c.normal).mul(delta), invI);
 
-		v = bone.velocityAt(c.r);
+		v = this.contactVelocity(c);
 		Vector3d vt = new Vector3d(v).fma(-v.dot(c.normal), c.normal);
 		double slide = vt.length();
 		if (slide < 1.0E-9) {
 			return;
 		}
 		Vector3d t = new Vector3d(vt).div(slide);
-		double tangentMass = 1.0 / bone.mass + RigidMath.angularTerm(invI, c.r, t);
+		Bone bone = this.bones()[c.bone];
+		double tangentMass = 1.0 / bone.mass + RigidMath.angularTerm(invI[c.bone], c.r, t);
+		if (c.otherBone >= 0 && c.rOther != null) {
+			tangentMass += 1.0 / this.bones()[c.otherBone].mass + RigidMath.angularTerm(invI[c.otherBone], c.rOther, t);
+		}
 		Vector3d newTangent = new Vector3d(c.tangentImpulse).fma(-slide / tangentMass, t);
-		double max = FRICTION * c.normalImpulse;
+		double max = (c.otherBone >= 0 ? SELF_FRICTION : FRICTION) * c.normalImpulse;
 		if (newTangent.length() > max) {
 			newTangent.normalize(max);
 		}
 		Vector3d tangentDelta = new Vector3d(newTangent).sub(c.tangentImpulse);
 		c.tangentImpulse.set(newTangent);
-		bone.applyImpulse(tangentDelta, c.r, invI);
+		this.applyContactImpulse(c, tangentDelta, invI);
 	}
 
 	// ================================================================ entities
@@ -787,7 +1173,14 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 
 	@Override
 	public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {
-		if (this.isRemoved() || this.isInvulnerableToBase(source) || source.is(DamageTypeTags.IS_EXPLOSION)) {
+		if (this.isRemoved() || this.isInvulnerableToBase(source)) {
+			return false;
+		}
+		if (this.recoverFrom != null && this.getFirstPassenger() instanceof LivingEntity rider) {
+			// Hitting a knocked-down body hurts whoever it is; the damage event flings the body.
+			return rider.hurtServer(level, source, damage);
+		}
+		if (source.is(DamageTypeTags.IS_EXPLOSION)) {
 			return false;
 		}
 		if (!(source.getDirectEntity() instanceof Player player)) {
@@ -969,6 +1362,9 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		output.store("Bones", SavedBone.CODEC.listOf(), saved);
 		output.putBoolean("Asleep", this.asleep);
 		output.putBoolean("Frozen", this.frozen);
+		output.storeNullable("RecoverFrom", Vec3.CODEC, this.recoverFrom);
+		output.putBoolean("RestoreAi", this.restoreAi);
+		output.putInt("DespawnIn", this.despawnAt < 0 ? -1 : Math.max(0, this.despawnAt - this.tickCount));
 	}
 
 	@Override
@@ -987,6 +1383,10 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		});
 		this.asleep = input.getBooleanOr("Asleep", false);
 		this.frozen = input.getBooleanOr("Frozen", false);
+		this.recoverFrom = input.read("RecoverFrom", Vec3.CODEC).orElse(null);
+		this.restoreAi = input.getBooleanOr("RestoreAi", false);
+		int despawnIn = input.getIntOr("DespawnIn", -1);
+		this.despawnAt = despawnIn < 0 ? -1 : this.tickCount + despawnIn;
 		if (this.bonesPlaced) {
 			this.afterBonesMoved();
 			this.syncPoses();

@@ -3,6 +3,7 @@
 	"package": "io.github.uddinnadd.realisticificator.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
+		"EntityRenderDispatcherMixin",
 		"ModelPartAccessor"
 	],
 	"injectors": {

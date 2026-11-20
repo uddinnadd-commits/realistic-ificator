@@ -38,6 +38,24 @@ Put a **spawn egg** into the Realistic-Ificator to get a *Realistic* spawn egg. 
 - The corpse is a set of rigid bones (head, torso, arms and legs, or four legs for animals) joined by ball joints with angle limits. It slumps, folds over ledges and tumbles down stairs.
 - Corpses float (flesh is slightly lighter than water), get blown around by TNT, can be stood on, and are shoved by falling realistic blocks.
 - Punch a corpse to knock it where you hit it. Sneak and punch to remove it.
+- A body's own limbs collide with each other, so arms and legs pile up instead of passing through the torso.
+
+## Getting knocked down
+
+Players (outside creative) and mobs turn into ragdolls when they get hit hard or caught in an explosion, and get flung away from the attacker or blast. Bigger hits and closer blasts throw them further; knockback resistance softens the throw.
+
+- While knocked down, mobs can't attack or wander, and a player's camera rides along with their body.
+- Once the body comes to rest, they get back up where it landed. Hitting the ground hard enough deals fall damage.
+- Anything killed by an attack or explosion leaves its ragdoll behind as a corpse for a while.
+
+Game rules:
+
+| Rule | Default | What it does |
+| --- | --- | --- |
+| `realistic_ificator:ragdoll_players` | `true` | Players get knocked down |
+| `realistic_ificator:ragdoll_mobs` | `true` | Mobs get knocked down |
+| `realistic_ificator:ragdoll_min_damage` | `2` | Smallest attack (in half-hearts) that knocks someone down; explosions always do |
+| `realistic_ificator:corpse_seconds` | `60` | How long bodies of killed things stay; `0` turns them off |
 
 ## Structure Wand
 

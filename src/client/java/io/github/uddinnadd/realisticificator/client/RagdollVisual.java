@@ -54,18 +54,31 @@ public final class RagdollVisual {
 			return null;
 		}
 		try {
-			Entity dummy = type.create(ragdoll.level(), EntitySpawnReason.LOAD);
+			// Prefer the real thing (a knocked-down mob or player, or one that is dying): it has the right skin,
+			// variant and gear. Otherwise rebuild a throwaway copy from the saved data.
+			Entity source = ragdoll.getLink() >= 0 ? ragdoll.level().getEntity(ragdoll.getLink()) : null;
+			if (source == null && info.entityData().getString("player_uuid").isPresent()) {
+				try {
+					source = ragdoll.level().getPlayerByUUID(java.util.UUID.fromString(info.entityData().getString("player_uuid").get()));
+				} catch (IllegalArgumentException ignored) {
+					// Malformed id: fall through to the default look.
+				}
+			}
+			boolean throwaway = source == null || source.getType() != type;
+			Entity dummy = throwaway ? type.create(ragdoll.level(), EntitySpawnReason.LOAD) : source;
 			if (dummy == null) {
 				return null;
 			}
-			try {
-				dummy.load(TagValueInput.create(ProblemReporter.DISCARDING, ragdoll.level().registryAccess(), info.entityData()));
-			} catch (RuntimeException ignored) {
-				// Unknown data just means the default look.
+			if (throwaway) {
+				try {
+					dummy.load(TagValueInput.create(ProblemReporter.DISCARDING, ragdoll.level().registryAccess(), info.entityData()));
+				} catch (RuntimeException ignored) {
+					// Unknown data just means the default look.
+				}
+				dummy.setPos(ragdoll.position());
+				// Never added to the level, so it has no ID; vanilla's held-item rendering reads one and throws without it.
+				dummy.setId(ragdoll.getId());
 			}
-			dummy.setPos(ragdoll.position());
-			// Never added to the level, so it has no ID; vanilla's held-item rendering reads one and throws without it.
-			dummy.setId(ragdoll.getId());
 			EntityRenderer<?, ?> renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(dummy);
 			if (!(renderer instanceof LivingEntityRenderer living)) {
 				return null;
@@ -80,7 +93,9 @@ public final class RagdollVisual {
 			List<Segment> segments = new ArrayList<>();
 			RagdollSkeleton.Kind kind = ragdoll.skeleton().kind;
 			collect(model.root(), "root", canonical, RagdollSkeleton.TORSO, kind, segments);
-			dummy.discard();
+			if (throwaway) {
+				dummy.discard();
+			}
 			return segments.isEmpty() ? null : new RagdollVisual(segments, renderType);
 		} catch (RuntimeException e) {
 			RealisticIficator.LOGGER.warn("Couldn't build ragdoll model for {}", info.entityType(), e);

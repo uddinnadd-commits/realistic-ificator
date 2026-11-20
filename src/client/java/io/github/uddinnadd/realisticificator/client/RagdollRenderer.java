@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.block.MovingBlockRenderState;
 import net.minecraft.client.renderer.entity.EntityRenderer;
@@ -15,6 +16,7 @@ import net.minecraft.client.renderer.entity.EntityRendererProvider;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -38,6 +40,8 @@ public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRender
 		final List<Vector3f> bonePositions = new ArrayList<>(); // relative to the render origin
 		final List<Quaternionf> boneRotations = new ArrayList<>();
 		float shadowSize;
+		/** Our own body seen from inside it: skip the head so first person isn't looking at the inside of a skull. */
+		boolean hideHead;
 	}
 
 	public RagdollRenderer(EntityRendererProvider.Context context) {
@@ -63,6 +67,9 @@ public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRender
 		}
 		state.visual = visual;
 		state.skeleton = entity.skeleton();
+		Minecraft mc = Minecraft.getInstance();
+		Entity camera = mc.getCameraEntity();
+		state.hideHead = camera != null && camera.getVehicle() == entity && mc.options.getCameraType().isFirstPerson();
 
 		// Render origin sits on the lowest point of the corpse so its shadow lands on the ground under it.
 		int count = entity.boneCount();
@@ -102,7 +109,7 @@ public class RagdollRenderer extends EntityRenderer<RagdollEntity, RagdollRender
 		if (state.visual != null && state.skeleton != null) {
 			for (RagdollVisual.Segment segment : state.visual.segments) {
 				int bone = segment.bone();
-				if (bone >= state.bonePositions.size()) {
+				if (bone >= state.bonePositions.size() || state.hideHead && bone == RagdollSkeleton.HEAD) {
 					continue;
 				}
 				Vector3f p = state.bonePositions.get(bone);
