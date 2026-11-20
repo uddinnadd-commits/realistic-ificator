@@ -1,0 +1,11 @@
+{
+  "parent": "realistic_ificator:root",
+  "criteria": { "done": { "trigger": "minecraft:impossible" } },
+  "display": {
+    "icon": { "id": "minecraft:leather_chestplate" },
+    "title": { "translate": "advancements.realistic_ificator.ragdolled.title" },
+    "description": { "translate": "advancements.realistic_ificator.ragdolled.description" },
+    "frame": "task"
+  },
+  "requirements": [ [ "done" ] ]
+}

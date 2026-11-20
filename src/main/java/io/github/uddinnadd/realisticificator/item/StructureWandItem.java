@@ -67,6 +67,7 @@ public class StructureWandItem extends Item {
 			BoundingBox box = next.box().orElseThrow();
 			player.sendOverlayMessage(Component.translatable("message.realistic_ificator.wand.second", pos.toShortString(),
 				box.getXSpan(), box.getYSpan(), box.getZSpan()).withStyle(ChatFormatting.GOLD));
+			player.sendSystemMessage(Component.translatable("message.realistic_ificator.wand.save_hint").withStyle(ChatFormatting.DARK_AQUA));
 		} else {
 			player.sendOverlayMessage(Component.translatable("message.realistic_ificator.wand.first", pos.toShortString()).withStyle(ChatFormatting.AQUA));
 		}
@@ -107,6 +108,10 @@ public class StructureWandItem extends Item {
 				stack.remove(ModComponents.WAND_SELECTION);
 				player.sendOverlayMessage(Component.translatable("message.realistic_ificator.wand.done", converted.blocks(), converted.bodies()).withStyle(ChatFormatting.GREEN));
 				level.playSound(null, player.blockPosition(), SoundEvents.ILLUSIONER_CAST_SPELL, SoundSource.PLAYERS, 1.0F, 1.2F);
+				io.github.uddinnadd.realisticificator.command.StructureSaves.sparkleBox((ServerLevel) level, box, net.minecraft.core.particles.ParticleTypes.ELECTRIC_SPARK);
+				if (player instanceof ServerPlayer serverPlayer) {
+					io.github.uddinnadd.realisticificator.registry.ModAdvancements.award(serverPlayer, io.github.uddinnadd.realisticificator.registry.ModAdvancements.CONVERTED);
+				}
 			}
 			case AreaConversion.Nothing nothing -> player.sendOverlayMessage(Component.translatable("message.realistic_ificator.wand.nothing").withStyle(ChatFormatting.RED));
 			case AreaConversion.TooBig tooBig -> player.sendOverlayMessage(Component.translatable("message.realistic_ificator.wand.too_big", tooBig.blocks(), tooBig.limit()).withStyle(ChatFormatting.RED));
@@ -157,5 +162,6 @@ public class StructureWandItem extends Item {
 		selection.second().ifPresent(p -> builder.accept(Component.translatable("tooltip.realistic_ificator.wand.second", p.toShortString()).withStyle(ChatFormatting.GOLD)));
 		builder.accept(Component.translatable("tooltip.realistic_ificator.wand.help.1").withStyle(ChatFormatting.GRAY));
 		builder.accept(Component.translatable("tooltip.realistic_ificator.wand.help.2").withStyle(ChatFormatting.GRAY));
+		builder.accept(Component.translatable("tooltip.realistic_ificator.wand.help.3").withStyle(ChatFormatting.DARK_AQUA));
 	}
 }

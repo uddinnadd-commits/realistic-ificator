@@ -30,6 +30,7 @@ public class RealisticIficator implements ModInitializer {
 		ModEntities.init();
 		ModMenus.init();
 		io.github.uddinnadd.realisticificator.entity.KnockDowns.init();
+		io.github.uddinnadd.realisticificator.command.ModCommands.init();
 
 		UseBlockCallback.EVENT.register(RealisticPlacement::onUseBlock);
 		CreativeModeTabEvents.modifyOutputEvent(CreativeModeTabs.TOOLS_AND_UTILITIES).register(output -> {

@@ -39,12 +39,14 @@ Put a **spawn egg** into the Realistic-Ificator to get a *Realistic* spawn egg. 
 - Corpses float (flesh is slightly lighter than water), get blown around by TNT, can be stood on, and are shoved by falling realistic blocks.
 - Punch a corpse to knock it where you hit it. Sneak and punch to remove it.
 - A body's own limbs collide with each other, so arms and legs pile up instead of passing through the torso.
+- Bodies can't pass through blocks, however hard they're thrown or dragged: a mob shut in a glass box stays in the box.
+- Hard landings thud and kick up dust from the block they hit, and fast-flying bodies leave a smoke trail.
 
 ## Getting knocked down
 
-Players (outside creative) and mobs turn into ragdolls when they get hit hard or caught in an explosion, and get flung away from the attacker or blast. Bigger hits and closer blasts throw them further; knockback resistance softens the throw.
+Players (outside creative) and mobs turn into ragdolls when they get hit hard or caught in an explosion, and get launched away from the attacker or blast in a big tumbling arc, arms and legs windmilling. Bigger hits and closer blasts throw them further: an 8-damage hit sends someone 15 to 20 blocks, nearby TNT 15 to 50. Sprinting hits and Knockback weapons throw harder; knockback resistance softens the throw.
 
-- While knocked down, mobs can't attack or wander, and a player's camera rides along with their body.
+- While knocked down, mobs can't attack or wander, and a player's camera rides along with their body. Slamming into things makes them yelp.
 - Once the body comes to rest, they get back up where it landed. Hitting the ground hard enough deals fall damage.
 - Anything killed by an attack or explosion leaves its ragdoll behind as a corpse for a while.
 
@@ -55,7 +57,25 @@ Game rules:
 | `realistic_ificator:ragdoll_players` | `true` | Players get knocked down |
 | `realistic_ificator:ragdoll_mobs` | `true` | Mobs get knocked down |
 | `realistic_ificator:ragdoll_min_damage` | `2` | Smallest attack (in half-hearts) that knocks someone down; explosions always do |
+| `realistic_ificator:fling_strength` | `100` | How hard bodies get thrown, in percent (try `300`) |
 | `realistic_ificator:corpse_seconds` | `60` | How long bodies of killed things stay; `0` turns them off |
+
+Operator commands for fun and testing: `/ragdoll [targets]` knocks targets down on the spot, and `/yeet <targets> [power]` launches them the way you're looking.
+
+## Saving and loading structures
+
+Every player has 10 save slots, stored in the world folder so they survive restarts.
+
+1. Select an area with the Structure Wand (right-click two corners).
+2. `/save <1-10>` saves everything in it: blocks, chest contents and entities.
+3. `/load <1-10>` (or `/load save3`) pastes it where you're looking, turned to face the way you're facing. Add `realistic` (`/load 3 realistic`) to drop it in as physics bodies.
+4. `/load undo` takes back your last paste. `/saves` lists your slots with clickable Load buttons.
+
+Saving works in any mode; loading needs creative mode or operator permissions. Up to 1,048,576 blocks (for example 128 x 64 x 128) per save.
+
+## Advancements
+
+The mod has its own advancement tab: get a Realistic-Ificator or Physics Gun, get ragdolled, get flung 20+ blocks (**YEET**), convert an area with the wand, and save and load a structure.
 
 ## Structure Wand
 

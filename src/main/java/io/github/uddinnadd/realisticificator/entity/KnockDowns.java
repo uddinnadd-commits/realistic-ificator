@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.util.Mth;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -32,6 +33,10 @@ public final class KnockDowns {
 	public static final GameRule<Integer> RAGDOLL_MIN_DAMAGE = GameRuleBuilder.forInteger(2)
 		.category(GameRuleCategory.MOBS)
 		.buildAndRegister(RealisticIficator.id("ragdoll_min_damage"));
+	/** How hard hits and explosions throw bodies, in percent. */
+	public static final GameRule<Integer> FLING_STRENGTH = GameRuleBuilder.forInteger(100)
+		.category(GameRuleCategory.MOBS)
+		.buildAndRegister(RealisticIficator.id("fling_strength"));
 	/** How long bodies of things killed by attacks or explosions stay, in seconds. 0 turns death bodies off. */
 	public static final GameRule<Integer> CORPSE_SECONDS = GameRuleBuilder.forInteger(60)
 		.category(GameRuleCategory.MOBS)
@@ -75,7 +80,11 @@ public final class KnockDowns {
 		if (explosion && entity.getVehicle() instanceof RagdollEntity) {
 			return; // the ragdoll itself is caught in the blast and gets pushed by it
 		}
-		RagdollEntity.knockDown(level, entity, motion, fling(entity, source, damageTaken), hitFrom(source));
+		// Vanilla has just applied its knockback, which includes sprinting, Knockback enchantments and maces: hits
+		// that knock back harder than a plain punch launch further.
+		double knockback = entity.getDeltaMovement().subtract(motion).horizontalDistance();
+		double boost = explosion ? 1.0 : Mth.clamp(knockback / 0.4, 1.0, 3.0);
+		RagdollEntity.knockDown(level, entity, motion, fling(level, entity, source, damageTaken).multiply(boost, 1.0 + (boost - 1.0) * 0.3, boost), hitFrom(source));
 	}
 
 	private static void afterDeath(LivingEntity entity, DamageSource source) {
@@ -91,7 +100,7 @@ public final class KnockDowns {
 		// Whatever the last hit was, it was big enough to kill: fling at least as hard as a few hearts would.
 		float damage = Math.max(6.0F, LAST_LETHAL_DAMAGE.getOrDefault(entity, 0.0F));
 		LAST_LETHAL_DAMAGE.remove(entity);
-		Vec3 fling = violent ? fling(entity, source, damage) : null;
+		Vec3 fling = violent ? fling(level, entity, source, damage) : null;
 		RagdollEntity.onDeath(level, entity, preHitMotion(entity), fling, hitFrom(source), Math.max(lifetime, knockedDown ? 20 : 0));
 	}
 
@@ -119,8 +128,11 @@ public final class KnockDowns {
 		return source.getSourcePosition();
 	}
 
-	/** Fling velocity: away from the attacker or blast, harder the more damage it did, softened by knockback resistance. */
-	private static Vec3 fling(LivingEntity entity, DamageSource source, float damage) {
+	/**
+	 * Fling velocity: away from the attacker or blast and up into a big comedy arc, harder the more damage it did,
+	 * softened by knockback resistance and scaled by the fling_strength rule.
+	 */
+	public static Vec3 fling(ServerLevel level, LivingEntity entity, DamageSource source, float damage) {
 		boolean explosion = source.is(DamageTypeTags.IS_EXPLOSION);
 		Vec3 from = source.getSourcePosition();
 		Vec3 away;
@@ -133,12 +145,11 @@ public final class KnockDowns {
 		}
 		away = away.lengthSqr() > 1.0E-4 ? away.normalize() : Vec3.ZERO;
 		double resistance = entity.getAttributeValue(explosion ? Attributes.EXPLOSION_KNOCKBACK_RESISTANCE : Attributes.KNOCKBACK_RESISTANCE);
-		double scale = Math.max(0.0, 1.0 - resistance);
-		// Ragdolls have little air drag, so these stay small: a few blocks for a punch, ~15 for point-blank TNT.
+		double scale = Math.max(0.0, 1.0 - resistance) * level.getGameRules().get(FLING_STRENGTH) / 100.0;
+		// Ragdolls have little air drag: an 8-damage hit sends someone ~15-20 blocks, nearby TNT 15-50.
 		double d = Math.min(damage, 30.0F);
-		double horizontal = explosion ? 0.25 + 0.015 * d : 0.1 + 0.025 * d;
-		double up = explosion ? 0.2 + 0.012 * d : 0.1 + 0.01 * d;
-		Vec3 v = away.scale(Math.min(horizontal, 0.75)).add(0, Math.min(up, 0.56), 0).scale(scale);
-		return v.length() > 1.0 ? v.normalize() : v;
+		double horizontal = explosion ? 0.4 + 0.03 * d : 0.3 + 0.05 * d;
+		double up = explosion ? 0.4 + 0.02 * d : 0.3 + 0.02 * d;
+		return away.scale(Math.min(horizontal, 1.2)).add(0, Math.min(up, 0.9), 0).scale(scale);
 	}
 }

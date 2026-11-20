@@ -1,0 +1,11 @@
+{
+  "parent": "realistic_ificator:ragdolled",
+  "criteria": { "done": { "trigger": "minecraft:impossible" } },
+  "display": {
+    "icon": { "id": "minecraft:tnt" },
+    "title": { "translate": "advancements.realistic_ificator.yeet.title" },
+    "description": { "translate": "advancements.realistic_ificator.yeet.description" },
+    "frame": "challenge"
+  },
+  "requirements": [ [ "done" ] ]
+}

@@ -22,7 +22,9 @@ import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.ExtraCodecs;
@@ -156,6 +158,12 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 	private double lastTorsoVy;
 	/** Tick at which a death corpse disappears, or -1 for corpses that stay (spawned from eggs). */
 	private int despawnAt = -1;
+	// Hardest terrain impact this tick, for thuds, dust and the occasional "oof".
+	private double impactSpeed;
+	private @Nullable Vec3 impactPoint;
+	private int nextImpactEffect;
+	/** Where the current fling started, to tell how far someone got launched. */
+	private @Nullable Vec3 launchedFrom;
 
 	/** Client: ids of entities currently represented by a ragdoll, so their own model is hidden. */
 	private static final Set<Integer> CLIENT_LINKS = ConcurrentHashMap.newKeySet();
@@ -238,6 +246,9 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			return null;
 		}
 		ragdoll.fling(fling, hitFrom);
+		if (entity instanceof ServerPlayer player) {
+			io.github.uddinnadd.realisticificator.registry.ModAdvancements.award(player, io.github.uddinnadd.realisticificator.registry.ModAdvancements.RAGDOLLED);
+		}
 		return ragdoll;
 	}
 
@@ -271,11 +282,12 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		}
 	}
 
-	/** Adds a velocity to the whole body, plus a twist from where the hit came from. */
+	/** Adds a velocity to the whole body, plus a cartwheel away from the hit and flailing limbs. */
 	public void fling(Vec3 velocity, @Nullable Vec3 hitFrom) {
 		this.frozen = false;
 		this.wake();
 		Bone torso = this.bones()[RagdollSkeleton.TORSO];
+		double power = velocity.length();
 		for (Bone bone : this.bones()) {
 			bone.linVel.add(velocity.x, velocity.y, velocity.z);
 		}
@@ -283,16 +295,30 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		Vector3d dir = new Vector3d(velocity.x, 0, velocity.z);
 		if (dir.length() > 1.0E-4) {
 			Vector3d spinAxis = new Vector3d(0, 1, 0).cross(dir.normalize());
-			double spin = Math.min(0.6, velocity.length() * 0.8);
+			double spin = Math.min(1.1, power * 1.2);
 			for (Bone bone : this.bones()) {
 				bone.angVel.fma(spin, spinAxis);
 			}
+		}
+		// Arms and legs windmill on the way, and a random twist so no two launches look the same.
+		double flail = Math.min(1.2, power * 1.5);
+		for (int i = 0; i < this.bones().length; i++) {
+			Bone bone = this.bones()[i];
+			double amount = i == RagdollSkeleton.TORSO ? 0.25 : 1.0;
+			bone.angVel.add(this.random.nextGaussian() * flail * amount, this.random.nextGaussian() * flail * amount, this.random.nextGaussian() * flail * amount);
 		}
 		if (hitFrom != null) {
 			Vector3d arm = new Vector3d(torso.pos).sub(hitFrom.x, hitFrom.y, hitFrom.z);
 			if (arm.length() > 1.0E-3) {
 				torso.angVel.add(arm.normalize().cross(0, 1, 0).mul(0.1));
 			}
+		}
+		if (power > 0.35) {
+			this.level().playSound(null, torso.pos.x, torso.pos.y, torso.pos.z, SoundEvents.PLAYER_ATTACK_SWEEP, SoundSource.NEUTRAL,
+				(float) Math.min(1.0, power), 0.6F + this.random.nextFloat() * 0.3F);
+		}
+		if (this.launchedFrom == null || power > 0.5) {
+			this.launchedFrom = RigidMath.vec(torso.pos);
 		}
 	}
 
@@ -557,8 +583,51 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		this.afterBonesMoved();
 		this.interactWithEntities((ServerLevel) this.level(), oldPos, oldRot);
 		this.syncPoses();
+		this.playMotionEffects((ServerLevel) this.level(), held);
 		if (this.recoverFrom != null) {
 			this.tickKnockDown((ServerLevel) this.level());
+		}
+	}
+
+	private void noteImpact(double speed, Vec3 point) {
+		if (speed > this.impactSpeed) {
+			this.impactSpeed = speed;
+			this.impactPoint = point;
+		}
+	}
+
+	/** Thuds and dust on hard landings, a yelp from whoever is knocked down, and a smoke trail while flying. */
+	private void playMotionEffects(ServerLevel level, boolean held) {
+		double speed = this.impactSpeed;
+		Vec3 point = this.impactPoint;
+		this.impactSpeed = 0;
+		this.impactPoint = null;
+		Bone torso = this.bones()[RagdollSkeleton.TORSO];
+		if (!held && torso.linVel.length() > 0.7 && this.tickCount % 2 == 0) {
+			level.sendParticles(ParticleTypes.CLOUD, torso.pos.x, torso.pos.y, torso.pos.z, 1, 0.1, 0.1, 0.1, 0.0);
+		}
+		if (point == null || speed < 0.3 || this.tickCount < this.nextImpactEffect) {
+			return;
+		}
+		this.nextImpactEffect = this.tickCount + 5;
+		BlockPos ground = BlockPos.containing(point.x, point.y - 0.05, point.z);
+		var state = level.getBlockState(ground);
+		if (state.isAir()) {
+			state = level.getBlockState(ground.below());
+		}
+		float volume = (float) Math.min(1.5, 0.4 + speed);
+		level.playSound(null, point.x, point.y, point.z, speed > 0.7 ? SoundEvents.PLAYER_BIG_FALL : SoundEvents.PLAYER_SMALL_FALL,
+			this.getSoundSource(), volume, 0.8F + this.random.nextFloat() * 0.3F);
+		if (!state.isAir()) {
+			level.playSound(null, point.x, point.y, point.z, state.getSoundType().getFallSound(), this.getSoundSource(), volume * 0.7F, 0.8F);
+			level.sendParticles(new net.minecraft.core.particles.BlockParticleOption(ParticleTypes.BLOCK, state), point.x, point.y + 0.1, point.z,
+				(int) Math.min(30, 6 + speed * 20), 0.25, 0.1, 0.25, 0.15);
+		}
+		if (speed > 0.6 && this.recoverFrom != null && this.getFirstPassenger() instanceof LivingEntity rider && rider.isAlive()) {
+			SoundEvent oof = ((io.github.uddinnadd.realisticificator.mixin.LivingEntityAccessor) rider).realisticIficator$hurtSound(this.damageSources().generic());
+			if (oof != null) {
+				level.playSound(null, point.x, point.y, point.z, oof, rider.getSoundSource(), 1.0F, rider.getVoicePitch() * (0.9F + this.random.nextFloat() * 0.4F));
+			}
 		}
 	}
 
@@ -636,6 +705,9 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 		}
 		if (rider instanceof ServerPlayer player) {
 			player.teleportTo(level, spot.x, spot.y, spot.z, Set.of(), player.getYRot(), player.getXRot(), false);
+			if (this.launchedFrom != null && this.launchedFrom.subtract(spot).horizontalDistance() >= 20) {
+				io.github.uddinnadd.realisticificator.registry.ModAdvancements.award(player, io.github.uddinnadd.realisticificator.registry.ModAdvancements.YEET);
+			}
 		} else {
 			rider.setPos(spot);
 		}
@@ -839,7 +911,12 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			if (spin > 1.0E-9) {
 				bone.rot.premul(new Quaterniond().rotationAxis(spin * this.dt, bone.angVel.x / spin, bone.angVel.y / spin, bone.angVel.z / spin)).normalize();
 			}
-			bone.pos.fma(this.dt, bone.linVel);
+			this.moveBone(bone, new Vector3d(bone.linVel).mul(this.dt), true);
+		}
+		for (Contact c : contacts) {
+			if (c.obstacle == null && c.otherBone < 0) {
+				this.noteImpact(c.closingSpeed, c.point);
+			}
 		}
 		return contacts.size();
 	}
@@ -875,7 +952,8 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 							continue;
 						}
 						Vec3 wp = bone.toWorld(new Vec3(sx * bone.half.x, sy * bone.half.y, sz * bone.half.z));
-						WorldCollider.Hit hit = world.penetration(wp);
+						Vec3 inward = new Vec3(bone.pos.x - wp.x, bone.pos.y - wp.y, bone.pos.z - wp.z);
+						WorldCollider.Hit hit = world.penetration(wp, inward);
 						if (hit != null) {
 							contacts.add(new Contact(b, wp, new Vector3d(hit.normal().getStepX(), hit.normal().getStepY(), hit.normal().getStepZ()), hit.depth(), null, 0));
 							continue;
@@ -1036,7 +1114,34 @@ public class RagdollEntity extends Entity implements PhysicsObject {
 			if (corrections[i].length() > 0.3) {
 				corrections[i].normalize(0.3);
 			}
-			bones[i].pos.add(corrections[i]);
+			this.moveBone(bones[i], corrections[i], false);
+		}
+	}
+
+	/**
+	 * Moves a bone, stopping its centre at the first terrain surface in the way, so a body can never pass through a
+	 * wall, floor or pane however hard it is thrown, dragged or pushed: whatever box it is in, it stays in.
+	 */
+	private void moveBone(Bone bone, Vector3d delta, boolean killVelocity) {
+		if (this.collider == null) {
+			bone.pos.add(delta);
+			return;
+		}
+		Vec3 from = RigidMath.vec(bone.pos);
+		Vec3 to = from.add(delta.x, delta.y, delta.z);
+		WorldCollider.Sweep hit = this.collider.sweep(from, to);
+		if (hit == null) {
+			bone.pos.add(delta);
+			return;
+		}
+		Vector3d n = new Vector3d(hit.normal().getStepX(), hit.normal().getStepY(), hit.normal().getStepZ());
+		bone.pos.set(hit.point().x + n.x * 0.01, hit.point().y + n.y * 0.01, hit.point().z + n.z * 0.01);
+		if (killVelocity) {
+			double into = bone.linVel.dot(n);
+			if (into < 0) {
+				bone.linVel.fma(-into * (1.0 + RESTITUTION), n);
+				this.noteImpact(-into, hit.point());
+			}
 		}
 	}
 

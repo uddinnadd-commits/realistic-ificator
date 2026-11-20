@@ -1,0 +1,15 @@
+{
+  "parent": "realistic_ificator:root",
+  "criteria": {
+    "has_gun": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "realistic_ificator:physics_gun" } ] }
+    }
+  },
+  "display": {
+    "icon": { "id": "realistic_ificator:physics_gun" },
+    "title": { "translate": "advancements.realistic_ificator.physics_major.title" },
+    "description": { "translate": "advancements.realistic_ificator.physics_major.description" }
+  },
+  "requirements": [ [ "has_gun" ] ]
+}

@@ -1,0 +1,17 @@
+{
+  "criteria": {
+    "has_ificator": {
+      "trigger": "minecraft:inventory_changed",
+      "conditions": { "items": [ { "items": "realistic_ificator:realistic_ificator" } ] }
+    }
+  },
+  "display": {
+    "icon": { "id": "realistic_ificator:realistic_ificator" },
+    "title": { "translate": "advancements.realistic_ificator.root.title" },
+    "description": { "translate": "advancements.realistic_ificator.root.description" },
+    "background": "minecraft:gui/advancements/backgrounds/stone",
+    "show_toast": true,
+    "announce_to_chat": false
+  },
+  "requirements": [ [ "has_ificator" ] ]
+}

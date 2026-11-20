@@ -1,0 +1,11 @@
+{
+  "parent": "realistic_ificator:root",
+  "criteria": { "done": { "trigger": "minecraft:impossible" } },
+  "display": {
+    "icon": { "id": "realistic_ificator:structure_wand" },
+    "title": { "translate": "advancements.realistic_ificator.structural_integrity.title" },
+    "description": { "translate": "advancements.realistic_ificator.structural_integrity.description" },
+    "frame": "goal"
+  },
+  "requirements": [ [ "done" ] ]
+}

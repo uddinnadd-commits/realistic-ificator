@@ -1,0 +1,11 @@
+{
+  "parent": "realistic_ificator:save_point",
+  "criteria": { "done": { "trigger": "minecraft:impossible" } },
+  "display": {
+    "icon": { "id": "minecraft:paper" },
+    "title": { "translate": "advancements.realistic_ificator.copy_paste.title" },
+    "description": { "translate": "advancements.realistic_ificator.copy_paste.description" },
+    "frame": "task"
+  },
+  "requirements": [ [ "done" ] ]
+}

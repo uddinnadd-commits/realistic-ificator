@@ -1,0 +1,11 @@
+{
+  "parent": "realistic_ificator:structural_integrity",
+  "criteria": { "done": { "trigger": "minecraft:impossible" } },
+  "display": {
+    "icon": { "id": "minecraft:writable_book" },
+    "title": { "translate": "advancements.realistic_ificator.save_point.title" },
+    "description": { "translate": "advancements.realistic_ificator.save_point.description" },
+    "frame": "task"
+  },
+  "requirements": [ [ "done" ] ]
+}

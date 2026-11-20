@@ -32,7 +32,8 @@ public final class ModItems {
 	public static final Item STRUCTURE_WAND = Registry.register(
 		BuiltInRegistries.ITEM,
 		STRUCTURE_WAND_KEY,
-		new StructureWandItem(new Item.Properties().setId(STRUCTURE_WAND_KEY).stacksTo(1).rarity(Rarity.RARE))
+		new StructureWandItem(new Item.Properties().setId(STRUCTURE_WAND_KEY).stacksTo(1).rarity(Rarity.RARE)
+			.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true))
 	);
 
 	private ModItems() {
